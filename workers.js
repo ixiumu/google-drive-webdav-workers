@@ -1,6 +1,6 @@
 var config = {
-    client_id: '202264815644.apps.googleusercontent.com',
-    client_secret: 'X4Z3ca8xfWDb1Voo-F9a7ZxJ',
+    client_id: '',
+    client_secret: '',
     refresh_token: '', // your refresh_token
     users: {
         'user': 'password' // webdav user
@@ -156,7 +156,7 @@ const gdrive = {
                 return new Response(null, {status: 404})
             }
     
-            let response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+            let response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&includeItemsFromAllDrives=true', {
                 body: JSON.stringify({
                     name,
                     mimeType: 'application/vnd.google-apps.folder',
@@ -273,7 +273,7 @@ const gdrive = {
                 }
                 
                 // upload
-                let response = await fetch(new Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
+                let response = await fetch(new Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&includeItemsFromAllDrives=true', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json; charset=UTF-8',
@@ -506,6 +506,8 @@ const gdrive = {
             if (!meta) {
                 name = decodeURIComponent(name).replace(/\'/g, "\\'")
                 const result = await gdrive.queryDrive({
+                    'includeItemsFromAllDrives': true,
+                    'supportsAllDrives': true,
                     q: `'${metadata.id}' in parents and name = '${name}' and trashed = false`,
                     fields: `files(id, name, mimeType, size, modifiedTime, description, iconLink, thumbnailLink, imageMediaMetadata, parents)`,
                 })
@@ -521,6 +523,8 @@ const gdrive = {
         const list = []
         const params = {
             pageSize: 1000,
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
             q: `'${id}' in parents and trashed = false AND name != '.password'`,
             fields: `nextPageToken, files(id, name, mimeType, size, modifiedTime, description, iconLink, thumbnailLink, imageMediaMetadata)`,
             orderBy: 'folder, name'
@@ -551,8 +555,8 @@ const gdrive = {
         // XFetch.js fix google api cdn bug
         return await xf.get(`https://www.googleapis.com/drive/v3/files/${id}`, {
             qs: {
-                // includeItemsFromAllDrives: true,
-                // supportsAllDrives: true,
+                includeItemsFromAllDrives: true,
+                supportsAllDrives: true,
                 alt: 'media',
                 acknowledgeAbuse: abuse ? 'true' : 'false'
             },
