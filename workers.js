@@ -1,7 +1,13 @@
+// add multiple serviceaccounts as {}, {}, {}, random account will be selected by each time app is opened.
+const serviceaccounts = [
+{}
+];
 var config = {
     client_id: '',
     client_secret: '',
     refresh_token: '', // your refresh_token
+    service_account: false, // true if you're using Service Account instead of user account
+    service_account_json: serviceaccounts[Math.floor(Math.random()*serviceaccounts.length)], // don't touch this one
     users: {
         'user': 'password' // webdav user
     },
@@ -25,6 +31,68 @@ var config = {
         config: {}
     }
 }
+
+const JSONWebToken = {
+    header: {
+        alg: 'RS256',
+        typ: 'JWT'
+    },
+    importKey: async function(pemKey) {
+        var pemDER = this.textUtils.base64ToArrayBuffer(pemKey.split('\n').map(s => s.trim()).filter(l => l.length && !l.startsWith('---')).join(''));
+        return crypto.subtle.importKey('pkcs8', pemDER, {
+            name: 'RSASSA-PKCS1-v1_5',
+            hash: 'SHA-256'
+        }, false, ['sign']);
+    },
+    createSignature: async function(text, key) {
+        const textBuffer = this.textUtils.stringToArrayBuffer(text);
+        return crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, textBuffer)
+    },
+    generateGCPToken: async function(serviceAccount) {
+        const iat = parseInt(Date.now() / 1000);
+        var payload = {
+            "iss": serviceAccount.client_email,
+            "scope": "https://www.googleapis.com/auth/drive",
+            "aud": "https://oauth2.googleapis.com/token",
+            "exp": iat + 3600,
+            "iat": iat
+        };
+        const encPayload = btoa(JSON.stringify(payload));
+        const encHeader = btoa(JSON.stringify(this.header));
+        var key = await this.importKey(serviceAccount.private_key);
+        var signed = await this.createSignature(encHeader + "." + encPayload, key);
+        return encHeader + "." + encPayload + "." + this.textUtils.arrayBufferToBase64(signed).replace(/\//g, '_').replace(/\+/g, '-');
+    },
+    textUtils: {
+        base64ToArrayBuffer: function(base64) {
+            var binary_string = atob(base64);
+            var len = binary_string.length;
+            var bytes = new Uint8Array(len);
+            for (var i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes.buffer;
+        },
+        stringToArrayBuffer: function(str) {
+            var len = str.length;
+            var bytes = new Uint8Array(len);
+            for (var i = 0; i < len; i++) {
+                bytes[i] = str.charCodeAt(i);
+            }
+            return bytes.buffer;
+        },
+        arrayBufferToBase64: function(buffer) {
+            let binary = '';
+            let bytes = new Uint8Array(buffer);
+            let len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        }
+    }
+};
+
 
 const cache = {
     get: async (k, ns) => {
@@ -603,14 +671,24 @@ const gdrive = {
         if (token && token.expires && token.expires > Date.now()) {
             return token.access_token
         }
-        const response = await fetch('https://www.googleapis.com/oauth2/v4/token', {
-            method: 'POST',
-            body: gdrive._encodeQueryString({
+        var post_data;
+        if (config.service_account && typeof config.service_account_json != "undefined") {
+            const jwttoken = await JSONWebToken.generateGCPToken(config.service_account_json);
+            post_data = {
+                grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                assertion: jwttoken,
+            };
+        } else {
+            post_data = {
                 client_id: config.client_id,
                 client_secret: config.client_secret,
                 refresh_token: config.refresh_token,
-                grant_type: 'refresh_token'
-            }),
+                grant_type: "refresh_token",
+            };
+        }
+        const response = await fetch('https://www.googleapis.com/oauth2/v4/token', {
+            method: 'POST',
+            body: gdrive._encodeQueryString(post_data),
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
