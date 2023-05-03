@@ -8,6 +8,8 @@ var config = {
     refresh_token: '', // your refresh_token
     service_account: false, // true if you're using Service Account instead of user account
     service_account_json: serviceaccounts[Math.floor(Math.random()*serviceaccounts.length)], // don't touch this one
+    link: 'https://github.com/PBhadoo/google-drive-webdav-workers',
+    name: 'GitHub',
     users: {
         'user': 'password' // webdav user
     },
@@ -783,7 +785,7 @@ const arrayToHtml = function(rpath, files, cursor) {
 <body>
   <h1><a href="/"><svg width="32" height="32" viewBox="0 0 320 320"><path d="M95 304 c-47 -24 -71 -51 -84 -95 -26 -87 20 -173 107 -199 145 -44 262 135 165 251 -48 56 -128 75 -188 43z m168 -73 c9 -16 17 -32 17 -35 0 -3 -35 -6 -78 -6 -85 0 -78 -4 -110 63 -2 4 32 7 75 7 76 0 79 -1 96 -29z m-149 -46 c38 -65 38 -65 16 -100 -22 -36 -22 -36 -62 32 -40 68 -40 68 -22 101 9 17 20 32 23 32 4 0 24 -29 45 -65z m166 -9 c0 -12 -75 -129 -86 -133 -7 -2 -26 -3 -42 -1 -30 3 -30 3 9 71 39 65 41 67 79 67 22 0 40 -2 40 -4z" /></svg>My Cloud Drive</a></h1>
   <main>{{content}}</main>
-  <footer><a target="_blank" href="https://xiumu.org">@xiumu</a></footer>
+  <footer><a target="_blank" href="`+config.link+`">`+config.name+`</a></footer>
 </body>
 </html>`
 
