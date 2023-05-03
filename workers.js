@@ -929,7 +929,26 @@ async function handleRequest(request) {
 
         // index
         if (method == 'GET'){
-            return await gdrive.methods.GET(request)
+            if (request.headers.has('Authorization')) {
+                const { user, pass } = basicAuthentication(request)
+                
+                if (!config.users[user] || config.users[user] !== pass) {
+                    return new Response('Unauthorized', { status: 401 })
+                }
+    
+                //if (method == 'patch') method = 'proppatch'
+                if (gdrive.methods[method]) {
+                    return await gdrive.methods[method](request)
+                }
+    
+                return new Response(null, { status: 403 })
+            }
+            return new Response('You need to login.', {
+                status: 401,
+                headers: {
+                    'WWW-Authenticate': 'Basic realm="DAV", charset="UTF-8"',
+                },
+            })
         }
 
         return new Response(null, { status: 403 })
