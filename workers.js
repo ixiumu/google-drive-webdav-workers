@@ -1,17 +1,21 @@
 // add multiple serviceaccounts as {}, {}, {}, random account will be selected by each time app is opened.
-const serviceaccounts = [
-{}
-];
+const serviceaccounts = [{}];
 var config = {
     client_id: '',
     client_secret: '',
     refresh_token: '', // your refresh_token
-    service_account: false, // true if you're using Service Account instead of user account
-    service_account_json: serviceaccounts[Math.floor(Math.random()*serviceaccounts.length)], // don't touch this one
+    service_account: true, // true if you're using Service Account instead of user account
+    service_account_json: serviceaccounts[Math.floor(Math.random() * serviceaccounts.length)], // don't touch this one
     link: 'https://github.com/PBhadoo/google-drive-webdav-workers',
     name: 'GitHub',
-    users: {
-        'user': 'password' // webdav user
+    owner_email: 'admin@example.com',
+    dav_auth: true,
+    dav_users: {
+        'b': 'b' // dav user
+    },
+    web_auth: true,
+    web_users: {
+        'a': 'a' // web user
     },
     working_dir: '/',
     cache: {
@@ -33,6 +37,98 @@ var config = {
         config: {}
     }
 }
+
+const unauthorized = `<html>
+   <head>
+      <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+      <title>Sign in - ${config.name}</title>
+      <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+      <meta name="robots" content="noindex, nofollow">
+      <meta name="googlebot" content="noindex, nofollow">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <script type="text/javascript" src="//code.jquery.com/jquery-3.3.1.slim.min.js"></script>
+      <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" integrity="sha384-JcKb8q3iqJ61gNV9KGb8thSsNjpSL0n8PARn9HuZOnIxN0hoP+VmmDGMN5t9UJ0Z" crossorigin="anonymous">
+      <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/font-awesome/4.7.0/css/font-awesome.min.css" integrity="sha384-wvfXpqpZZVQGK6TAh5PVlGOfQNHSoD2xbE+QkPxCAFlNEevoEH3Sl0sibVcOQVnN" crossorigin="anonymous">
+      <style id="compiled-css" type="text/css">.login,.image{min-height:100vh}.bg-image{background-image:url('https://cdn.jsdelivr.net/gh/logingateway/images@1.0/background.jpg');background-size:cover;background-position:center center}#error-message{display:none}</style>
+      <link rel="preconnect" href="https://fonts.googleapis.com">
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+      <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Palette+Mosaic&display=swap" rel="stylesheet">
+      <style>
+         .logo {
+         font-family: 'Orbitron', sans-serif;
+         color: #007bff;
+         }
+      </style>
+      <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js" integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4=" crossorigin="anonymous"></script>
+<script>
+$(document).ready(function() {
+  $('form').submit(function(event) {
+    event.preventDefault(); // Prevent form submission
+
+    var username = $('#email').val();
+    var password = $('#password').val();
+    var url = 'https://' + username + ':' + password + '@' + window.location.hostname;
+
+    $.ajax({
+      url: url,
+      type: 'GET',
+      success: function(response) {
+        // Handle successful response from server
+        window.location.href = ''; // Redirect to new page
+      },
+      error: function(xhr, status, error) {
+        // Handle error response from server
+        var errorMessage = xhr.responseText;
+        document.getElementById('error').innerHTML = 'Invalid Login Details, Retry or Contact Admin.';
+      }
+    });
+  });
+});
+</script>
+   </head>
+   <body>
+      <div class="container-fluid">
+         <div class="row no-gutter">
+            <div class="col-md-6 d-none d-md-flex bg-image"></div>
+            <div class="col-md-6 bg-light">
+               <div class="login d-flex align-items-center py-5">
+                  <div class="container">
+                     <div class="row">
+                        <div class="col-lg-10 col-xl-7 mx-auto">
+                           <h3 class="logo">${config.name}</h3>
+                           <p class="text-muted mb-4">Requires Common Sense...</p>
+                           <div id="error-message" class="alert alert-danger"></div>
+                           <form onsubmit="return false;" method="post">
+                                <p id="error" style="color:red;"></p>
+                              <div class="form-group mb-3">
+                                 <input id="email" type="text" placeholder="Username" autofocus="" class="form-control rounded-pill border-0 shadow-sm px-4" required>
+                              </div>
+                              <div class="form-group mb-3">
+                                 <input id="password" type="password" placeholder="Password" class="form-control rounded-pill border-0 shadow-sm px-4 text-primary" required>
+                              </div>
+                              <button id="btn-login" type="submit" class="btn btn-primary btn-block text-uppercase mb-2 rounded-pill shadow-sm">Login</button>
+                              <hr class="solid">
+                              <center>
+                                 <p id="hidereset">
+                                    <marquee>No Signup Process Available, contact your administrator for id and password at ${config.owner_email} or visit ${config.link}.</marquee>
+                                 </p>
+                              </center>
+                           </form>
+                        </div>
+                     </div>
+                  </div>
+               </div>
+               <center>
+                  <p>
+                     &copy; <script>document.write(new Date().getFullYear())</script> ${config.name}
+                  </p>
+               </center>
+            </div>
+         </div>
+      </div>
+   </body>
+</html>`
+
 
 const JSONWebToken = {
     header: {
@@ -107,7 +203,9 @@ const cache = {
 
         // kv
         if (typeof KV !== 'undefined') {
-            const v = await KV.get(ns + '.' + k, {type: 'json'})
+            const v = await KV.get(ns + '.' + k, {
+                type: 'json'
+            })
             if (v) {
                 config.cache[ns][k] = v
                 // console.log('kv cached: ' + ns + '.' + k)
@@ -139,7 +237,7 @@ const gdrive = {
             let allowed_methods = [
                 'GET', 'HEAD', 'OPTIONS', 'PUT', 'PROPFIND', 'MKCOL', 'DELETE', 'MOVE', 'COPY'
             ].join(',');
-    
+
             return new Response(null, {
                 status: 200,
                 headers: {
@@ -149,17 +247,22 @@ const gdrive = {
                     'Accept-Ranges': 'bytes'
                 }
             })
-    
+
         },
         PROPFIND: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
             const metadata = await gdrive.getMetadata(fpath)
-    
+
             if (!metadata) {
-                return new Response(null, {status: 404})
+                return new Response(null, {
+                    status: 404
+                })
             }
 
-            
+
             let content;
             if (metadata.mimeType == 'application/vnd.google-apps.folder') {
                 const depth = request.headers.get('Depth')
@@ -175,7 +278,12 @@ const gdrive = {
                         })
                     })
 
-                    content = arrayToXml(rpath, [ {name: '', dir: true, lastmodified: null, size: 0} ].concat(files || []), '');
+                    content = arrayToXml(rpath, [{
+                        name: '',
+                        dir: true,
+                        lastmodified: null,
+                        size: 0
+                    }].concat(files || []), '');
                 } else {
                     // depth 0
                     content = arrayToXml(rpath, [{
@@ -194,7 +302,7 @@ const gdrive = {
                     size: metadata.size
                 }]);
             }
-    
+
             // HTTP/1.1 207 Multi-Status
             response = new Response(content, {
                 status: 207,
@@ -202,56 +310,76 @@ const gdrive = {
                     'Content-Type': 'application/xml; charset=utf-8'
                 }
             })
-    
+
             return response
         },
         MKCOL: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
-    
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
+
             if (fpath.slice(-1) === '/') {
                 fpath = fpath.slice(0, -1)
             }
-    
+
             let metadata = await gdrive.getMetadata(fpath)
-            if (metadata){
-                return new Response('<d:error xmlns:d="DAV:" xmlns:td="https://www.contoso.com/schema/"><td:exception>MethodNotAllowed</td:exception><td:message>The resource you tried to create already exists</td:message></d:error>', {status: 405})
+            if (metadata) {
+                return new Response('<d:error xmlns:d="DAV:" xmlns:td="https://www.contoso.com/schema/"><td:exception>MethodNotAllowed</td:exception><td:message>The resource you tried to create already exists</td:message></d:error>', {
+                    status: 405
+                })
             }
-    
+
             const tok = fpath.split('/');
             const name = tok.pop();
             const parent = tok.join('/');
-    
+
             metadata = await gdrive.getMetadata(parent)
             if (!metadata) {
-                return new Response(null, {status: 404})
+                return new Response(null, {
+                    status: 404
+                })
             }
-    
-            let response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&includeItemsFromAllDrives=true', {
-                body: JSON.stringify({
-                    name,
-                    mimeType: 'application/vnd.google-apps.folder',
-                    parents: [metadata.id]
-                }),
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json; charset=UTF-8',
-                    Authorization: 'Bearer ' + (await gdrive.getAccessToken())
+            let response;
+            for (let i = 0; i < 3; i++) {
+                response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&includeItemsFromAllDrives=true', {
+                    body: JSON.stringify({
+                        name,
+                        mimeType: 'application/vnd.google-apps.folder',
+                        parents: [metadata.id]
+                    }),
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json; charset=UTF-8',
+                        Authorization: 'Bearer ' + (await gdrive.getAccessToken())
+                    }
+                }))
+                if (response.ok) {
+                    break;
                 }
-            }))
-    
-            if (response.ok == true) {
-                return new Response(null, {status: 201})
+                await this.sleep(800 * (i + 1));
             }
-    
-            return new Response(null, {status: 422})
+
+            if (response.ok == true) {
+                return new Response(null, {
+                    status: 201
+                })
+            }
+
+            return new Response(null, {
+                status: 422
+            })
         },
         GET: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
             let url = new URL(request.url)
-    
+
             let response
             const metadata = await gdrive.getMetadata(fpath)
-            if (metadata){
+            if (metadata) {
                 try {
                     // Folder
                     if (metadata.mimeType == 'application/vnd.google-apps.folder') {
@@ -274,7 +402,7 @@ const gdrive = {
                             }
                         })
                     }
-    
+
                     // Image file response
                     if (metadata.mimeType.startsWith('image/')) {
                         // tempLink expires after one hour
@@ -282,7 +410,7 @@ const gdrive = {
                         url.param = url.param || '=s0' // thumbnail or original
                         return await fetch(new Request(tempLink + url.param, request))
                     }
-    
+
                     // Other file response
                     const abuse = url.searchParams.get('abuse') == 'true'
                     const range = request.headers.get('Range')
@@ -297,20 +425,29 @@ const gdrive = {
                         error.status = response.status
                         throw error
                     }
-                } catch(e) {
+                } catch (e) {
                     console.error(e);
-                    response = new Response(e.message, {status: 500})
+                    response = new Response(e.message, {
+                        status: 500
+                    })
                 }
             } else {
-                response = new Response(null, {status: 404})
+                response = new Response(null, {
+                    status: 404
+                })
             }
             return response
         },
         PUT: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
-    
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
+
             if (fpath.slice(-1) === '/') {
-              return new Response(null, {status: 405});
+                return new Response(null, {
+                    status: 405
+                });
             }
 
             const contentLength = request.headers.get('Content-Length')
@@ -323,11 +460,13 @@ const gdrive = {
                 const tok = fpath.split('/');
                 const name = tok.pop();
                 const parent = tok.join('/');
-    
+
                 const parentMetadata = await gdrive.getMetadata(parent)
-        
+
                 if (!parentMetadata) {
-                    return new Response(null, {status: 404})
+                    return new Response(null, {
+                        status: 404
+                    })
                 }
 
                 // delete old
@@ -341,7 +480,7 @@ const gdrive = {
                     })
                     cache.delete(fpath, 'meta')
                 }
-                
+
                 // upload
                 let response = await fetch(new Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&includeItemsFromAllDrives=true', {
                     method: 'POST',
@@ -357,7 +496,9 @@ const gdrive = {
 
                 putUrl = response.headers.get('Location');
                 if (!putUrl) {
-                    return new Response(JSON.stringify(response), {status: 403})
+                    return new Response(JSON.stringify(response), {
+                        status: 403
+                    })
                 }
 
                 config.cache.putUrl[fpath] = putUrl
@@ -377,50 +518,65 @@ const gdrive = {
             }
 
             if (response.status <= 201) {
-                return new Response(null, {status: 201})
+                return new Response(null, {
+                    status: 201
+                })
             }
 
-            return new Response(JSON.stringify(response), {status: response.status})
+            return new Response(JSON.stringify(response), {
+                status: response.status
+            })
 
         },
         MOVE: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
-    
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
+
             // disable rename root folder
             if (rpath === '/' || rpath === '/dav/') {
-                return new Response(null, {status: 403})
+                return new Response(null, {
+                    status: 403
+                })
             }
-    
+
             let destination = request.headers.get('Destination');
-    
+
             if (!destination) {
-                return new Response(null, {status: 403})
+                return new Response(null, {
+                    status: 403
+                })
             }
-            
-            const dest_fpath = gdrive.pathJoin(config.working_dir,  decodeURIComponent(new URL(destination).pathname))
-    
+
+            const dest_fpath = gdrive.pathJoin(config.working_dir, decodeURIComponent(new URL(destination).pathname))
+
             const metadata = await gdrive.getMetadata(fpath)
             if (!metadata) {
-                return new Response(null, {status: 404})
+                return new Response(null, {
+                    status: 404
+                })
             }
-    
+
             const tok = fpath.split('/');
             const name = tok.pop();
             const parent = tok.join('/');
-    
+
             const dest_tok = dest_fpath.split('/');
             const dest_name = dest_tok.pop();
             const dest_parent = dest_tok.join('/');
-    
+
             let patchUrl;
             if (dest_parent !== parent) {
                 const dest_metadata = await gdrive.getMetadata(dest_parent)
                 if (!dest_metadata) {
-                    return new Response(null, {status: 404})
+                    return new Response(null, {
+                        status: 404
+                    })
                 }
                 patchUrl = 'removeParents=' + metadata.parents.pop() + '&addParents=' + dest_metadata.id
             }
-    
+
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?' + patchUrl, {
                 method: 'PATCH',
                 headers: {
@@ -431,9 +587,9 @@ const gdrive = {
                     name: dest_name
                 }) : null
             })
-    
+
             const result = await response.json()
-    
+
             if (result.id) {
                 cache.delete(fpath, 'meta')
 
@@ -446,44 +602,55 @@ const gdrive = {
             }
         },
         COPY: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
-    
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
+
             let destination = request.headers.get('Destination');
             if (!destination) {
-                return new Response(null, {status: 403})
+                return new Response(null, {
+                    status: 403
+                })
             }
 
             let dest_rpath = decodeURIComponent(new URL(destination).pathname);
 
             // disable copy root folder
             if (dest_rpath === '/' || dest_rpath === '/dav/') {
-                return new Response(null, {status: 403})
+                return new Response(null, {
+                    status: 403
+                })
             }
 
             let dest_fpath = gdrive.pathJoin(config.working_dir, dest_rpath);
-    
+
             const metadata = await gdrive.getMetadata(fpath)
             if (!metadata) {
-                return new Response(null, {status: 404})
+                return new Response(null, {
+                    status: 404
+                })
             }
-    
+
             const tok = fpath.split('/');
             const name = tok.pop();
             const parent = tok.join('/');
-    
+
             const dest_tok = dest_fpath.split('/');
             const dest_name = dest_tok.pop();
             const dest_parent = dest_tok.join('/');
-    
+
             let parents = metadata.parents
             if (dest_parent !== parent) {
                 const dest_metadata = await gdrive.getMetadata(dest_parent)
                 if (!dest_metadata) {
-                    return new Response(null, {status: 404})
+                    return new Response(null, {
+                        status: 404
+                    })
                 }
                 parents = [dest_metadata.id]
             }
-    
+
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '/copy', {
                 method: 'POST',
                 headers: {
@@ -495,36 +662,50 @@ const gdrive = {
                     parents: parents
                 })
             })
-    
-            return new Response(null, {status: 201})
+
+            return new Response(null, {
+                status: 201
+            })
         },
         DELETE: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
 
             if (rpath == '/' || rpath == '/dav/') {
-                return new Response(null, {status: 403})
+                return new Response(null, {
+                    status: 403
+                })
             }
 
             const metadata = await gdrive.getMetadata(fpath)
-            if (metadata){
+            if (metadata) {
                 const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id, {
                     method: 'DELETE',
                     headers: {
                         Authorization: 'Bearer ' + (await gdrive.getAccessToken())
                     }
                 })
-    
+
                 cache.delete(fpath, 'meta')
-                return new Response(null, {status: response.status})
+                return new Response(null, {
+                    status: response.status
+                })
             }
-    
-            return new Response(null, {status: 404})
+
+            return new Response(null, {
+                status: 404
+            })
         },
         HEAD: async (request) => {
-            let { rpath, fpath } = gdrive.getUrl(request.url)
+            let {
+                rpath,
+                fpath
+            } = gdrive.getUrl(request.url)
 
             const metadata = await gdrive.getMetadata(fpath)
-            if (metadata){
+            if (metadata) {
                 const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?fields=id,name,mimeType,size,modifiedTime', {
                     headers: {
                         Authorization: 'Bearer ' + (await gdrive.getAccessToken())
@@ -542,18 +723,26 @@ const gdrive = {
                     })
                 }
             }
-            
-            return new Response(null, {status: 404})
+
+            return new Response(null, {
+                status: 404
+            })
         },
         // hack
         LOCK: async () => {
-            return new Response(null, {status: 200})
+            return new Response(null, {
+                status: 200
+            })
         },
         UNLOCK: async () => {
-            return new Response(null, {status: 200})
+            return new Response(null, {
+                status: 200
+            })
         },
         PROPPATCH: async () => {
-            return new Response(null, {status: 200})
+            return new Response(null, {
+                status: 200
+            })
         }
     },
     getMetadata: async (path) => {
@@ -612,7 +801,7 @@ const gdrive = {
     },
     getRawContent: async (id, range, abuse) => {
         const param = abuse ? '&acknowledgeAbuse=true' : ''
-        
+
         // fetch
         // const response = await fetch('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media' + param, {
         //     headers: {
@@ -740,18 +929,20 @@ const arrayToXml = function(rpath, files, cursor) {
         if (!file.lastmodified) file.lastmodified = new Date().toGMTString()
         return [
             '<d:response>',
-                `<d:href>${encodeURI(gdrive.pathJoin(rpath, file.name))}</d:href>`,
-                '<d:propstat>',
-                    '<d:prop>',
-                        `<d:getlastmodified>${file.lastmodified}</d:getlastmodified>`,
-                        file.dir ? '<d:resourcetype><d:collection/></d:resourcetype>' : '<d:resourcetype />',
-                        !file.dir ? `<d:getcontentlength>${file.size}</d:getcontentlength>` : '<d:getcontentlength />',
-                        file.quota ? `<d:quota-used-bytes>${file.quota.used}</d:quota-used-bytes><d:quota-available-bytes>${file.quota.available}</d:quota-available-bytes>` : '',
-                    '</d:prop>',
-                    '<d:status>HTTP/1.1 200 OK</d:status>',
-                '</d:propstat>',
+            `<d:href>${encodeURI(gdrive.pathJoin(rpath, file.name))}</d:href>`,
+            '<d:propstat>',
+            '<d:prop>',
+            `<d:getlastmodified>${file.lastmodified}</d:getlastmodified>`,
+            file.dir ? '<d:resourcetype><d:collection/></d:resourcetype>' : '<d:resourcetype />',
+            !file.dir ? `<d:getcontentlength>${file.size}</d:getcontentlength>` : '<d:getcontentlength />',
+            file.quota ? `<d:quota-used-bytes>${file.quota.used}</d:quota-used-bytes><d:quota-available-bytes>${file.quota.available}</d:quota-available-bytes>` : '',
+            '</d:prop>',
+            '<d:status>HTTP/1.1 200 OK</d:status>',
+            '</d:propstat>',
             '</d:response>',
-        ].filter(function(e) { return e; }).join('\n');
+        ].filter(function(e) {
+            return e;
+        }).join('\n');
     }).join('\n');
 
     var new_cursor = cursor ? `<td:cursor>${cursor}</td:cursor>` : '';
@@ -785,7 +976,7 @@ const arrayToHtml = function(rpath, files, cursor) {
 <body>
   <h1><a href="/"><svg width="32" height="32" viewBox="0 0 320 320"><path d="M95 304 c-47 -24 -71 -51 -84 -95 -26 -87 20 -173 107 -199 145 -44 262 135 165 251 -48 56 -128 75 -188 43z m168 -73 c9 -16 17 -32 17 -35 0 -3 -35 -6 -78 -6 -85 0 -78 -4 -110 63 -2 4 32 7 75 7 76 0 79 -1 96 -29z m-149 -46 c38 -65 38 -65 16 -100 -22 -36 -22 -36 -62 32 -40 68 -40 68 -22 101 9 17 20 32 23 32 4 0 24 -29 45 -65z m166 -9 c0 -12 -75 -129 -86 -133 -7 -2 -26 -3 -42 -1 -30 3 -30 3 9 71 39 65 41 67 79 67 22 0 40 -2 40 -4z" /></svg>My Cloud Drive</a></h1>
   <main>{{content}}</main>
-  <footer><a target="_blank" href="`+config.link+`">`+config.name+`</a></footer>
+  <footer><a target="_blank" href="` + config.link + `">` + config.name + `</a></footer>
 </body>
 </html>`
 
@@ -793,7 +984,7 @@ const arrayToHtml = function(rpath, files, cursor) {
     const title = rpath == '/' ? '' : ' - ' + rpath
     rpath == '/' || frag.push(`<a href="../"><div><img src="/_/16/type/application/vnd.google-apps.folder"><b>../</b></div></a>`)
     files && files.forEach(entry => {
-        entry.iconLink = entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/','/_/')
+        entry.iconLink = entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/')
         if (entry.dir) {
             frag.push(`<a href="${entry.name}/">`)
             frag.push(`<div><img src="${entry.iconLink}"/><b>${entry.name}</b></div>`)
@@ -820,26 +1011,125 @@ const formatSize = (n) => {
 }
 
 // XFetch.js modified
-const xf=(()=>{const METHODS=['get','post','put','patch','delete','head'];class HTTPError extends Error{constructor(res){super(res.statusText);this.name='HTTPError';this.response=res}}class XResponsePromise extends Promise{}const{assign}=Object;function mergeDeep(target,source){const isObject=obj=>obj&&typeof obj==='object';if(!isObject(target)||!isObject(source)){return source}Object.keys(source).forEach(key=>{const targetValue=target[key];const sourceValue=source[key];if(Array.isArray(targetValue)&&Array.isArray(sourceValue)){target[key]=targetValue.concat(sourceValue)}else if(isObject(targetValue)&&isObject(sourceValue)){target[key]=mergeDeep(Object.assign({},targetValue),sourceValue)}else{target[key]=sourceValue}});return target}const fromEntries=ent=>ent.reduce((acc,[k,v])=>(acc[k]=v,acc),{});const typeis=(...types)=>val=>types.some(type=>typeof type==='string'?typeof val===type:val instanceof type);const isstr=typeis('string');const isobj=typeis('object');const isstrorobj=v=>isstr(v)||isobj(v);const responseErrorThrower=res=>{if(!res.ok)throw new HTTPError(res);return res};const extend=(defaultInit={})=>{const xfetch=(input,init={})=>{mergeDeep(init,defaultInit);const createQueryString=o=>new init.URLSearchParams(o).toString();const parseQueryString=s=>fromEntries([...new init.URLSearchParams(s).entries()]);const url=new init.URL(input,init.baseURI||undefined);if(!init.headers){init.headers={}}else if(typeis(init.Headers)(init.headers)){init.headers=fromEntries([...init.headers.entries()])}if(init.json){init.body=JSON.stringify(init.json);init.headers['Content-Type']='application/json'}else if(isstrorobj(init.urlencoded)){init.body=isstr(init.urlencoded)?init.urlencoded:createQueryString(init.urlencoded);init.headers['Content-Type']='application/x-www-form-urlencoded'}else if(typeis(init.FormData,'object')(init.formData)){if(!typeis(init.FormData)(init.formData)){const fd=new init.FormData();for(const[k,v]of Object.entries(init.formData)){fd.append(k,v)}init.formData=fd}init.body=init.formData}if(init.qs){if(isstr(init.qs))init.qs=parseQueryString(init.qs);url.search=createQueryString(assign(fromEntries([...url.searchParams.entries()]),init.qs))}return XResponsePromise.resolve(init.fetch(url,init).then(responseErrorThrower))};for(const method of METHODS){xfetch[method]=(input,init={})=>{init.method=method.toUpperCase();return xfetch(input,init)}}xfetch.extend=newDefaultInit=>extend(assign({},defaultInit,newDefaultInit));xfetch.HTTPError=HTTPError;return xfetch};const isWindow=typeof document!=='undefined';const isBrowser=typeof self!=='undefined';return isBrowser?extend({fetch:fetch.bind(self),URL,Response,URLSearchParams,Headers,FormData,baseURI:isWindow?document.baseURI:''}):extend()})();
+const xf = (() => {
+    const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head'];
+    class HTTPError extends Error {
+        constructor(res) {
+            super(res.statusText);
+            this.name = 'HTTPError';
+            this.response = res
+        }
+    }
+    class XResponsePromise extends Promise {}
+    const {
+        assign
+    } = Object;
+
+    function mergeDeep(target, source) {
+        const isObject = obj => obj && typeof obj === 'object';
+        if (!isObject(target) || !isObject(source)) {
+            return source
+        }
+        Object.keys(source).forEach(key => {
+            const targetValue = target[key];
+            const sourceValue = source[key];
+            if (Array.isArray(targetValue) && Array.isArray(sourceValue)) {
+                target[key] = targetValue.concat(sourceValue)
+            } else if (isObject(targetValue) && isObject(sourceValue)) {
+                target[key] = mergeDeep(Object.assign({}, targetValue), sourceValue)
+            } else {
+                target[key] = sourceValue
+            }
+        });
+        return target
+    }
+    const fromEntries = ent => ent.reduce((acc, [k, v]) => (acc[k] = v, acc), {});
+    const typeis = (...types) => val => types.some(type => typeof type === 'string' ? typeof val === type : val instanceof type);
+    const isstr = typeis('string');
+    const isobj = typeis('object');
+    const isstrorobj = v => isstr(v) || isobj(v);
+    const responseErrorThrower = res => {
+        if (!res.ok) throw new HTTPError(res);
+        return res
+    };
+    const extend = (defaultInit = {}) => {
+        const xfetch = (input, init = {}) => {
+            mergeDeep(init, defaultInit);
+            const createQueryString = o => new init.URLSearchParams(o).toString();
+            const parseQueryString = s => fromEntries([...new init.URLSearchParams(s).entries()]);
+            const url = new init.URL(input, init.baseURI || undefined);
+            if (!init.headers) {
+                init.headers = {}
+            } else if (typeis(init.Headers)(init.headers)) {
+                init.headers = fromEntries([...init.headers.entries()])
+            }
+            if (init.json) {
+                init.body = JSON.stringify(init.json);
+                init.headers['Content-Type'] = 'application/json'
+            } else if (isstrorobj(init.urlencoded)) {
+                init.body = isstr(init.urlencoded) ? init.urlencoded : createQueryString(init.urlencoded);
+                init.headers['Content-Type'] = 'application/x-www-form-urlencoded'
+            } else if (typeis(init.FormData, 'object')(init.formData)) {
+                if (!typeis(init.FormData)(init.formData)) {
+                    const fd = new init.FormData();
+                    for (const [k, v] of Object.entries(init.formData)) {
+                        fd.append(k, v)
+                    }
+                    init.formData = fd
+                }
+                init.body = init.formData
+            }
+            if (init.qs) {
+                if (isstr(init.qs)) init.qs = parseQueryString(init.qs);
+                url.search = createQueryString(assign(fromEntries([...url.searchParams.entries()]), init.qs))
+            }
+            return XResponsePromise.resolve(init.fetch(url, init).then(responseErrorThrower))
+        };
+        for (const method of METHODS) {
+            xfetch[method] = (input, init = {}) => {
+                init.method = method.toUpperCase();
+                return xfetch(input, init)
+            }
+        }
+        xfetch.extend = newDefaultInit => extend(assign({}, defaultInit, newDefaultInit));
+        xfetch.HTTPError = HTTPError;
+        return xfetch
+    };
+    const isWindow = typeof document !== 'undefined';
+    const isBrowser = typeof self !== 'undefined';
+    return isBrowser ? extend({
+        fetch: fetch.bind(self),
+        URL,
+        Response,
+        URLSearchParams,
+        Headers,
+        FormData,
+        baseURI: isWindow ? document.baseURI : ''
+    }) : extend()
+})();
 
 const basicAuthentication = (request) => {
     const Authorization = request.headers.get('Authorization')
     const [scheme, encoded] = Authorization.split(' ')
-  
+
     if (!encoded || scheme !== 'Basic') {
-        return new Response('Bad Request', { status: 400 })
+        return new Response('Bad Request', {
+            status: 400
+        })
     }
-  
+
     const buffer = Uint8Array.from(atob(encoded), character => character.charCodeAt(0))
     const decoded = new TextDecoder().decode(buffer).normalize()
     const index = decoded.indexOf(':')
     if (index === -1 || /[\0-\x1F\x7F]/.test(decoded)) {
-        return new Response('Bad Request', { status: 400 })
+        return new Response('Bad Request', {
+            status: 400
+        })
     }
-  
+
     return {
-      user: decoded.substring(0, index),
-      pass: decoded.substring(index + 1),
+        user: decoded.substring(0, index),
+        pass: decoded.substring(index + 1),
     }
 }
 
@@ -849,19 +1139,28 @@ addEventListener('fetch', event => {
 
 async function handleRequest(request) {
     try {
-        const { protocol, pathname } = new URL(request.url)
+        const {
+            protocol,
+            pathname
+        } = new URL(request.url)
         const method = request.method.toUpperCase()
 
         if (pathname == '/robots.txt') {
-            return new Response('User-agent: *\nDisallow: /', { status: 200 })
+            return new Response('User-agent: *\nDisallow: /', {
+                status: 200
+            })
         }
-        
+
         if (pathname == '/favicon.ico') {
-            return new Response(null, { status: 204 })
+            return new Response(null, {
+                status: 204
+            })
         }
-        
+
         if (pathname.indexOf('/desktop.ini') != -1) {
-            return new Response(null, { status: 404 })
+            return new Response(null, {
+                status: 404
+            })
         }
 
         if (pathname.startsWith('/_/')) {
@@ -876,84 +1175,121 @@ async function handleRequest(request) {
         }
 
         if (pathname == '/logout') {
-            return new Response('Logged out.', { status: 401 })
+            return new Response('Logged out.', {
+                status: 401
+            })
         }
 
         if (pathname.startsWith('/dav/')) {
 
             if ('https:' !== protocol || 'https' !== request.headers.get('x-forwarded-proto')) {
-                return new Response('Please use a HTTPS connection.', { status: 400 })
+                return new Response('Please use a HTTPS connection.', {
+                    status: 400
+                })
             }
-    
+
             if (request.headers.has('Authorization')) {
-                const { user, pass } = basicAuthentication(request)
-                
-                if (!config.users[user] || config.users[user] !== pass) {
-                    return new Response('Unauthorized', { status: 401 })
+                const {
+                    user,
+                    pass
+                } = basicAuthentication(request)
+
+                if (!config.dav_users[user] || config.dav_users[user] !== pass) {
+                    return new Response('Incorrect Credentials.', {
+                        status: 401,
+                    })
                 }
-    
+
                 //if (method == 'patch') method = 'proppatch'
                 if (method == 'patch') method = 'copy'
                 if (gdrive.methods[method]) {
                     return await gdrive.methods[method](request)
                 }
-    
-                return new Response(null, { status: 403 })
-            }
-    
-            return new Response('You need to login.', {
-                status: 401,
-                headers: {
-                    'WWW-Authenticate': 'Basic realm="DAV", charset="UTF-8"',
-                },
-            })
 
+                return new Response(null, {
+                    status: 403
+                })
+            }
+            if (config.dav_auth) {
+                return new Response('Login Required.', {
+                    status: 401,
+                    headers: {
+                        'WWW-Authenticate': 'Basic realm="DAV", charset="UTF-8"',
+                    }
+                })
+            }
+            if (method == 'patch') method = 'copy'
+            if (gdrive.methods[method]) {
+                return await gdrive.methods[method](request)
+            }
         }
 
         if (pathname == '/dav') {
-            return Response.redirect( request.url + '/', 301)
+            return Response.redirect(request.url + '/', 301)
         }
 
         // PROPFIND
         if (pathname == '/' && method == 'PROPFIND') {
             const content = arrayToXml('/', [{
-                name: '',
-                dir: true,
-                lastmodified: null
-            },
-            {
-                name: 'dav/',
-                dir: true,
-                lastmodified: null
-            }])
-            return new Response(content, { status: 207 })
+                    name: '',
+                    dir: true,
+                    lastmodified: null
+                },
+                {
+                    name: 'dav/',
+                    dir: true,
+                    lastmodified: null
+                }
+            ])
+            return new Response(content, {
+                status: 207
+            })
         }
 
         // index
-        if (method == 'GET'){
+        if (method == 'GET') {
             if (request.headers.has('Authorization')) {
-                const { user, pass } = basicAuthentication(request)
-                
-                if (!config.users[user] || config.users[user] !== pass) {
-                    return new Response('Unauthorized', { status: 401 })
+                const {
+                    user,
+                    pass
+                } = basicAuthentication(request)
+
+                if (!config.web_users[user] || config.web_users[user] !== pass) {
+                    return new Response(unauthorized, {
+                        status: 401,
+                        headers: {
+                            'WWW-Authenticate': 'Basic realm="WEB", charset="UTF-8"',
+                            'content-type': 'text/html;charset=UTF-8'
+                        }
+                    })
                 }
-    
+
                 //if (method == 'patch') method = 'proppatch'
                 if (gdrive.methods[method]) {
                     return await gdrive.methods[method](request)
                 }
-    
-                return new Response(null, { status: 403 })
+
+                return new Response(null, {
+                    status: 403
+                })
             }
-            return new Response('You need to login.', {
-                status: 401,
-                headers: {
-                    'WWW-Authenticate': 'Basic realm="DAV", charset="UTF-8"',
-                },
-            })
+            if (config.web_auth) {
+                return new Response(unauthorized, {
+                    status: 401,
+                    headers: {
+                        'WWW-Authenticate': 'Basic realm="WEB", charset="UTF-8"',
+                        'content-type': 'text/html;charset=UTF-8'
+                    }
+                })
+            }
+            if (gdrive.methods[method]) {
+                return await gdrive.methods[method](request)
+            }
         }
 
-        return new Response(null, { status: 403 })
+        return new Response(null, {
+            status: 403
+        })
 
     } catch (e) {
         const status = e.code || 500
