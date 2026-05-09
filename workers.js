@@ -524,7 +524,7 @@ export default {
             if (!request.headers.has('Authorization')) {
                 return new Response('Authentication Required.', {
                     status: 401,
-                    headers: { 'WWW-Authenticate': 'Basic realm="My Cloud Drive", charset="UTF-8"' }
+                    headers: { 'WWW-Authenticate': 'Basic realm="' + config.name + '", charset="UTF-8"' }
                 });
             }
 
