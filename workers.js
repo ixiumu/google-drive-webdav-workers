@@ -50,8 +50,6 @@ function basicAuthentication(request) {
     return { user: decoded.substring(0, index), pass: decoded.substring(index + 1) };
 };
 
-const xf = (() => { const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head']; class HTTPError extends Error { constructor(res) { super(res.statusText); this.name = 'HTTPError'; this.response = res; } } class XResponsePromise extends Promise { } const { assign } = Object; function mergeDeep(target, source) { const isObject = obj => obj && typeof obj === 'object'; if (!isObject(target) || !isObject(source)) { return source; } Object.keys(source).forEach(key => { const targetValue = target[key]; const sourceValue = source[key]; if (Array.isArray(targetValue) && Array.isArray(sourceValue)) { target[key] = targetValue.concat(sourceValue); } else if (isObject(targetValue) && isObject(sourceValue)) { target[key] = mergeDeep(Object.assign({}, targetValue), sourceValue); } else { target[key] = sourceValue; } }); return target; } const fromEntries = ent => ent.reduce((acc, [k, v]) => (acc[k] = v, acc), {}); const typeis = (...types) => val => types.some(type => typeof type === 'string' ? typeof val === type : val instanceof type); const isstr = typeis('string'); const isobj = typeis('object'); const isstrorobj = v => isstr(v) || isobj(v); const responseErrorThrower = res => { if (!res.ok) throw new HTTPError(res); return res; }; const extend = (defaultInit = {}) => { const xfetch = (input, init = {}) => { mergeDeep(init, defaultInit); const createQueryString = o => new init.URLSearchParams(o).toString(); const parseQueryString = s => fromEntries([...new init.URLSearchParams(s).entries()]); const url = new init.URL(input, init.baseURI || undefined); if (!init.headers) { init.headers = {}; } else if (typeis(init.Headers)(init.headers)) { init.headers = fromEntries([...init.headers.entries()]); } if (init.json) { init.body = JSON.stringify(init.json); init.headers['Content-Type'] = 'application/json'; } else if (isstrorobj(init.urlencoded)) { init.body = isstr(init.urlencoded) ? init.urlencoded : createQueryString(init.urlencoded); init.headers['Content-Type'] = 'application/x-www-form-urlencoded'; } else if (typeis(init.FormData, 'object')(init.formData)) { if (!typeis(init.FormData)(init.formData)) { const fd = new init.FormData(); for (const [k, v] of Object.entries(init.formData)) { fd.append(k, v); } init.formData = fd; } init.body = init.formData; } if (init.qs) { if (isstr(init.qs)) init.qs = parseQueryString(init.qs); url.search = createQueryString(assign(fromEntries([...url.searchParams.entries()]), init.qs)); } return XResponsePromise.resolve(init.fetch(url, init).then(responseErrorThrower)); }; for (const method of METHODS) { xfetch[method] = (input, init = {}) => { init.method = method.toUpperCase(); return xfetch(input, init); }; } xfetch.extend = newDefaultInit => extend(assign({}, defaultInit, newDefaultInit)); xfetch.HTTPError = HTTPError; return xfetch; }; const isWindow = typeof document !== 'undefined'; const isBrowser = typeof self !== 'undefined'; return isBrowser ? extend({ fetch: fetch.bind(self), URL, Response, URLSearchParams, Headers, FormData, baseURI: isWindow ? document.baseURI : '' }) : extend(); })();
-
 class KVCache {
     /**
      * @param {Env} env
@@ -489,10 +487,11 @@ class GDrive {
     async getRawContent(id, range, abuse) {
         const headers = { Authorization: 'Bearer ' + (await this.getAccessToken()) };
         if (range) headers['Range'] = range;
-        return await xf['get'](`https://www.googleapis.com/drive/v3/files/${id}`, {
-            qs: { supportsAllDrives: true, alt: 'media', acknowledgeAbuse: abuse ? 'true' : 'false' },
-            headers: headers
-        });
+        const url = new URL(`https://www.googleapis.com/drive/v3/files/${id}`);
+        url.searchParams.set('supportsAllDrives', 'true');
+        url.searchParams.set('alt', 'media');
+        url.searchParams.set('acknowledgeAbuse', abuse ? 'true' : 'false');
+        return await fetch(url, { headers });
     }
 
     /**
