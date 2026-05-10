@@ -21,6 +21,8 @@ interface KVNamespace {
 interface Env {
     KV: KVNamespace;
     USERS: string;
+    CLIENT_ID: string;
+    CLIENT_SECRET: string;
     REFRESH_TOKEN: string;
     ROOT_ID: string;
     NAME: string;

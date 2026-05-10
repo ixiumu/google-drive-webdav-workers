@@ -633,6 +633,8 @@ export default {
                         config.users = env.USERS;
                     }
                 }
+                if (env.CLIENT_ID) config.client_id = env.CLIENT_ID;
+                if (env.CLIENT_SECRET) config.client_secret = env.CLIENT_SECRET;
                 if (env.REFRESH_TOKEN) config.refresh_token = env.REFRESH_TOKEN;
                 if (env.ROOT_ID) config.cache.meta['/'].data.id = env.ROOT_ID;
                 if (env.NAME) config.name = env.NAME;
