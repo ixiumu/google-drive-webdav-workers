@@ -1,3 +1,6 @@
+// @ts-check
+/// <reference path='./types.d.ts' />
+
 var config = {
     client_id: '202264815644.apps.googleusercontent.com', // Google API Client ID
     client_secret: 'X4Z3ca8xfWDb1Voo-F9a7ZxJ', // Google API Client Secret
@@ -30,7 +33,11 @@ const formatSize = (n) => {
     if (n < 1024) return n + 'B'; if (n < 1024 * 1024) return Math.round(n / 1024) + 'K';
     return parseFloat((n / 1024 / 1024).toFixed(1)) + 'M';
 };
-const basicAuthentication = (request) => {
+
+/**
+ * @param {Request} request
+ */
+function basicAuthentication(request) {
     const Authorization = request.headers.get('Authorization');
     if (!Authorization) return null;
     const [scheme, encoded] = Authorization.split(' ');
@@ -45,11 +52,19 @@ const basicAuthentication = (request) => {
 const xf = (() => { const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head']; class HTTPError extends Error { constructor(res) { super(res.statusText); this.name = 'HTTPError'; this.response = res; } } class XResponsePromise extends Promise { } const { assign } = Object; function mergeDeep(target, source) { const isObject = obj => obj && typeof obj === 'object'; if (!isObject(target) || !isObject(source)) { return source; } Object.keys(source).forEach(key => { const targetValue = target[key]; const sourceValue = source[key]; if (Array.isArray(targetValue) && Array.isArray(sourceValue)) { target[key] = targetValue.concat(sourceValue); } else if (isObject(targetValue) && isObject(sourceValue)) { target[key] = mergeDeep(Object.assign({}, targetValue), sourceValue); } else { target[key] = sourceValue; } }); return target; } const fromEntries = ent => ent.reduce((acc, [k, v]) => (acc[k] = v, acc), {}); const typeis = (...types) => val => types.some(type => typeof type === 'string' ? typeof val === type : val instanceof type); const isstr = typeis('string'); const isobj = typeis('object'); const isstrorobj = v => isstr(v) || isobj(v); const responseErrorThrower = res => { if (!res.ok) throw new HTTPError(res); return res; }; const extend = (defaultInit = {}) => { const xfetch = (input, init = {}) => { mergeDeep(init, defaultInit); const createQueryString = o => new init.URLSearchParams(o).toString(); const parseQueryString = s => fromEntries([...new init.URLSearchParams(s).entries()]); const url = new init.URL(input, init.baseURI || undefined); if (!init.headers) { init.headers = {}; } else if (typeis(init.Headers)(init.headers)) { init.headers = fromEntries([...init.headers.entries()]); } if (init.json) { init.body = JSON.stringify(init.json); init.headers['Content-Type'] = 'application/json'; } else if (isstrorobj(init.urlencoded)) { init.body = isstr(init.urlencoded) ? init.urlencoded : createQueryString(init.urlencoded); init.headers['Content-Type'] = 'application/x-www-form-urlencoded'; } else if (typeis(init.FormData, 'object')(init.formData)) { if (!typeis(init.FormData)(init.formData)) { const fd = new init.FormData(); for (const [k, v] of Object.entries(init.formData)) { fd.append(k, v); } init.formData = fd; } init.body = init.formData; } if (init.qs) { if (isstr(init.qs)) init.qs = parseQueryString(init.qs); url.search = createQueryString(assign(fromEntries([...url.searchParams.entries()]), init.qs)); } return XResponsePromise.resolve(init.fetch(url, init).then(responseErrorThrower)); }; for (const method of METHODS) { xfetch[method] = (input, init = {}) => { init.method = method.toUpperCase(); return xfetch(input, init); }; } xfetch.extend = newDefaultInit => extend(assign({}, defaultInit, newDefaultInit)); xfetch.HTTPError = HTTPError; return xfetch; }; const isWindow = typeof document !== 'undefined'; const isBrowser = typeof self !== 'undefined'; return isBrowser ? extend({ fetch: fetch.bind(self), URL, Response, URLSearchParams, Headers, FormData, baseURI: isWindow ? document.baseURI : '' }) : extend(); })();
 
 class KVCache {
+    /**
+     * @param {Env} env
+     * @param {Ctx} ctx
+     */
     constructor(env, ctx) {
         this.env = env;
         this.ctx = ctx;
     }
 
+    /**
+     * @param {string} k
+     * @param {string} ns
+     */
     async get(k, ns) {
         const now = Date.now();
         if (config.cache[ns] && config.cache[ns][k]) {
@@ -68,6 +83,12 @@ class KVCache {
         return null;
     }
 
+    /**
+     * @param {string} k
+     * @param {any} v
+     * @param {string} ns
+     * @param {number} [customTtl]
+     */
     async put(k, v, ns, customTtl) {
         if (v) {
             if (!config.cache[ns]) config.cache[ns] = {};
@@ -79,6 +100,10 @@ class KVCache {
         }
     }
 
+    /**
+     * @param {string} k
+     * @param {string} ns
+     */
     async delete(k, ns) {
         if (ns === 'meta' && !k.endsWith('/')) k += '/';
         if (ns === 'meta' && k === '/') return;
@@ -90,6 +115,9 @@ class KVCache {
         }
     }
 
+    /**
+     * @param {string} fpath
+     */
     async invalidateFileAndParent(fpath) {
         await this.delete(fpath, 'meta');
         const tok = fpath.split('/');
@@ -99,16 +127,36 @@ class KVCache {
     }
 }
 
+class StatusError extends Error {
+    /**
+     * @param {string} message
+     * @param {number} status
+     */
+    constructor(message, status) {
+        super(message);
+        this.status = status;
+    }
+}
+
 class GDrive {
+    /**
+     * @param {KVCache} cache
+     */
     constructor(cache) {
         this.cache = cache;
     }
 
+    /**
+     * @param {Request} request
+     */
     async OPTIONS(request) {
         let allowed_methods = ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PROPFIND', 'MKCOL', 'DELETE', 'MOVE', 'COPY'].join(',');
         return new Response(null, { status: 200, headers: { 'Allow': allowed_methods, 'DAV': '1, 2, 3', 'MS-Author-Via': 'DAV', 'Accept-Ranges': 'bytes' } });
     }
 
+    /**
+     * @param {Request} request
+     */
     async PROPFIND(request) {
         let { rpath, fpath } = getUrl(request.url);
         const metadata = await this.getMetadata(fpath);
@@ -124,7 +172,7 @@ class GDrive {
                     let object = objects[i];
                     files.push({ name: object.name, dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toUTCString(), size: object.size ? object.size : 0 });
                 }
-                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: null, size: 0 }].concat(files || []), '');
+                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: null, size: 0 }, ...(files || [])], '');
             } else {
                 content = arrayToXml(rpath, [{ name: rpath, dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: rpath === '/' ? await this.getQuota() : null }]);
             }
@@ -134,6 +182,9 @@ class GDrive {
         return new Response(content, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
 
+    /**
+     * @param {Request} request
+     */
     async MKCOL(request) {
         let { rpath, fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') fpath = fpath.slice(0, -1);
@@ -159,6 +210,9 @@ class GDrive {
         return new Response(null, { status: 422 });
     }
 
+    /**
+     * @param {Request} request
+     */
     async GET(request) {
         let { rpath, fpath } = getUrl(request.url);
         let url = new URL(request.url);
@@ -177,8 +231,9 @@ class GDrive {
                 }
                 if (metadata.mimeType.startsWith('image/')) {
                     const tempLink = metadata.thumbnailLink.replace(/=s\d+$/, '');
-                    url.param = url.param || '=s0';
-                    return await fetch(new Request(tempLink + url.param, request));
+                    const rawParam = url.searchParams.get('param');
+                    const paramSuffix = rawParam ? `=${rawParam}` : '=s0';
+                    return await fetch(new Request(tempLink + paramSuffix, request));
                 }
                 const abuse = url.searchParams.get('abuse') === 'true';
                 const range = request.headers.get('Range');
@@ -188,17 +243,20 @@ class GDrive {
                     if (!abuse && response.status === 403 && result.error.errors[0].reason === 'cannotDownloadAbusiveFile') {
                         return Response.redirect(url.origin + url.pathname + '?abuse=true', 302);
                     }
-                    const error = new Error(result.error.message); error.status = response.status; throw error;
+                    throw new StatusError(result.error.message, response.status);
                 }
             } catch (e) { return new Response(e.message, { status: 500 }); }
         } else { response = new Response(null, { status: 404 }); }
         return response;
     }
 
+    /**
+     * @param {Request} request
+     */
     async PUT(request) {
         let { rpath, fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') return new Response(null, { status: 405 });
-        const contentLength = request.headers.get('Content-Length');
+        const contentLength = request.headers.get('Content-Length') || '0';
 
         let putUrl = await this.cache.get(fpath, 'putUrl');
         let parentMetadata;
@@ -236,6 +294,9 @@ class GDrive {
         return new Response(response.status <= 201 ? null : JSON.stringify(response), { status: response.status <= 201 ? 201 : response.status });
     }
 
+    /**
+     * @param {Request} request
+     */
     async MOVE(request) {
         let { rpath, fpath } = getUrl(request.url);
         if (rpath === '/') return new Response(null, { status: 403 });
@@ -277,6 +338,9 @@ class GDrive {
         }
     }
 
+    /**
+     * @param {Request} request
+     */
     async COPY(request) {
         let { rpath, fpath } = getUrl(request.url);
         let destination = request.headers.get('Destination');
@@ -312,6 +376,9 @@ class GDrive {
         return new Response(null, { status: 201 });
     }
 
+    /**
+     * @param {Request} request
+     */
     async DELETE(request) {
         let { rpath, fpath } = getUrl(request.url);
         if (rpath === '/') return new Response(null, { status: 403 });
@@ -328,13 +395,16 @@ class GDrive {
         return new Response(null, { status: 404 });
     }
 
+    /**
+     * @param {Request} request
+     */
     async HEAD(request) {
         let { rpath, fpath } = getUrl(request.url);
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true', { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
             const result = await response.json();
-            if (result) return new Response(null, { status: 200, headers: { 'Content-Length': result.mimeType, 'Content-Type': result.size, 'date': new Date(result.modifiedTime).toUTCString() } });
+            if (result) return new Response(null, { status: 200, headers: { 'Content-Length': result.size, 'Content-Type': result.mimeType, 'date': new Date(result.modifiedTime).toUTCString() } });
         }
         return new Response(null, { status: 404 });
     }
@@ -344,6 +414,9 @@ class GDrive {
     async PROPPATCH() { return new Response(null, { status: 200 }); }
 
     // API Helper Methods
+    /**
+     * @param {string} path
+     */
     async getMetadata(path) {
         path = path.startsWith('/') ? path : '/' + path;
         path = path.endsWith('/') ? path : path + '/';
@@ -380,6 +453,9 @@ class GDrive {
         return metadata;
     }
 
+    /**
+     * @param {string} id
+     */
     async getObjects(id) {
         let cachedList = await this.cache.get(id, 'objects');
         if (cachedList) return cachedList;
@@ -404,15 +480,23 @@ class GDrive {
         return list;
     }
 
+    /**
+     * @param {string} id
+     * @param {string|null} range
+     * @param {boolean} abuse
+     */
     async getRawContent(id, range, abuse) {
         const headers = { Authorization: 'Bearer ' + (await this.getAccessToken()) };
         if (range) headers['Range'] = range;
-        return await xf.get(`https://www.googleapis.com/drive/v3/files/${id}`, {
+        return await xf['get'](`https://www.googleapis.com/drive/v3/files/${id}`, {
             qs: { supportsAllDrives: true, alt: 'media', acknowledgeAbuse: abuse ? 'true' : 'false' },
             headers: headers
         });
     }
 
+    /**
+     * @param {QueryParams} params
+     */
     async queryDrive(params, retryCount = 0) {
         const driveUrl = 'https://www.googleapis.com/drive/v3/files?' + encodeQueryString(params);
         const response = await fetch(driveUrl, { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
@@ -424,13 +508,14 @@ class GDrive {
                 await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
                 return this.queryDrive(params, retryCount + 1);
             }
-            const error = new Error(errMsg || 'Unknown Google Drive API Error');
-            error.status = response.status;
-            throw error;
+            throw new StatusError(errMsg || 'Unknown Google Drive API Error', response.status);
         }
         return result;
     }
 
+    /**
+     * @returns {Promise<VFile['quota']>}
+     */
     async getQuota() {
         const response = await fetch('https://www.googleapis.com/drive/v3/about?fields=storageQuota', { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
         const result = await response.json();
@@ -445,13 +530,18 @@ class GDrive {
             body: encodeQueryString({ client_id: config.client_id, client_secret: config.client_secret, refresh_token: config.refresh_token, grant_type: 'refresh_token' })
         });
         const result = await response.json();
-        if (result.error) { const error = new Error(result.error_description); error.status = response.status; throw error; }
+        if (result.error) { throw new StatusError(result.error_description, response.status); }
         await this.cache.put('token', { expires: Date.now() + 3500 * 1000, access_token: result.access_token }, 'config', 3500 * 1000);
         return result.access_token;
     }
 }
 
-const arrayToXml = function (rpath, files, cursor) {
+/**
+ * @param {string} rpath
+ * @param {VFile[]} files
+ * @param {string} [cursor]
+ */
+function arrayToXml(rpath, files, cursor) {
     let entries = [];
     for (let i = 0; i < files.length; i++) {
         let file = files[i];
@@ -459,7 +549,7 @@ const arrayToXml = function (rpath, files, cursor) {
         let sizeTag = !file.dir ? `<d:getcontentlength>${file.size}</d:getcontentlength>` : '<d:getcontentlength />';
         let quotaTag = file.quota ? `<d:quota-used-bytes>${file.quota.used}</d:quota-used-bytes><d:quota-available-bytes>${file.quota.available}</d:quota-available-bytes>` : '';
 
-        let href = pathJoin(rpath, file.name);
+        let href = file.name ? pathJoin(rpath, file.name) : rpath;
         if (file.dir && !href.endsWith('/')) href += '/';
 
         entries.push(
@@ -474,7 +564,11 @@ const arrayToXml = function (rpath, files, cursor) {
     return `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:" xmlns:R="https://www.contoso.com/schema/">${entries.join('\n')}${new_cursor}</d:multistatus>`;
 };
 
-const arrayToHtml = function (rpath, files) {
+/**
+ * @param {string} rpath
+ * @param {any[]} files
+ */
+function arrayToHtml(rpath, files) {
     const tpl = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/><link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAApVBMVEUAAAD///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////+4/eNVAAAANnRSTlMA9isRpA3y8NfOoQjl3amJgVcX2sm/cUAw+MO6s5ttOhsU+urfrZB6dWZQRCPSlUsyBeueYCQaPAIhAAABdUlEQVQ4y23S2WKCQAwF0EsRkMWyivvWqrVqF7vc//+0mjhQRM9TkoEZJgENi/l34bp+UB5wx6n0WesmDlrSiFe+XnEl0OoTG6bNTcZUh4eLF81yG5VCC7vZtCp0tdALTdrR1AK4N5UhVR9qT5UCCXH1DktNXI0LCbnFRTiiks+YUx2lfuAKqqrG57Cn0QzKL2CsteyFWGgwcszWHOBiQLVHSVH3bdSrook5Y6Y3bnT0w4SZuamOaGGKD+f4GUYsKxGk/3UH9emkyjxpnz5Q3S2lyhrfaUnbX2Dwws9WK9t2HPTliOD/0He6lmCe592zN58cY0drUU1o4NgiO098OPz8/J2SWzkogvI2uBZ6OsKI3En6SrSMScsB5PeRRnPeWv+QEZnJboDARcszyaUEPxpw2FpPtGfVWMb9bWt9SfLNxCf5JTadThB0xKNak14Gw855h3dEzZnwRrFEU2m11hO0ZHHU2P39iFthGk96rrvux6mN2h80rVPh8HjxPAAAAABJRU5ErkJggg=="/><title>${config.name}{{title}}</title><style>*{box-sizing:border-box}body{font:15px/1.3 Helvetica,Arial;background:#0E1117;color:#CAD1D9}h1,main{background:#0E1117;max-width:960px;margin:10px auto;border-radius:5px}h1{font-size:18px;padding:15px;border:#22262D 1px solid;color:#DDD;background:#171b22}a{color:inherit;text-decoration:none}h1 a,main a{display:flex;align-items:center}main a:first-child{border-top-left-radius:5px;border-top-right-radius:5px}main a:last-child{border-bottom-left-radius:5px;border-bottom-right-radius:5px}svg{margin-right:15px;fill:#F1F6FC}h1:hover{color:#BABBBD}main{border:#22262D 1px solid}main img{margin-right:10px}main a{padding:12px 15px;border-bottom:#22262D 1px solid;transition:all .3s}main a:last-child{border:0}main a:hover{background:#171B22;color:#58a6ff}main a>div{margin-left:10px}main a>div:first-child{flex:1;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center}main a>div:not(:first-child){color:#8C949E;font-size:13px}footer{text-align:center;color:#8C949E;font-size:13px}footer a:hover{text-decoration:underline}@media (max-width:640px){main a>div:last-child{display:none}}</style></head><body><h1><a href="/"><svg width="32" height="32" viewBox="0 0 320 320"><path d="M95 304 c-47 -24 -71 -51 -84 -95 -26 -87 20 -173 107 -199 145 -44 262 135 165 251 -48 56 -128 75 -188 43z m168 -73 c9 -16 17 -32 17 -35 0 -3 -35 -6 -78 -6 -85 0 -78 -4 -110 63 -2 4 32 7 75 7 76 0 79 -1 96 -29z m-149 -46 c38 -65 38 -65 16 -100 -22 -36 -22 -36 -62 32 -40 68 -40 68 -22 101 9 17 20 32 23 32 4 0 24 -29 45 -65z m166 -9 c0 -12 -75 -129 -86 -133 -7 -2 -26 -3 -42 -1 -30 3 -30 3 9 71 39 65 41 67 79 67 22 0 40 -2 40 -4z" /></svg>${config.name}</a></h1><main>{{content}}</main><footer><a target="_blank" href="${config.link}">${config.copyright}</a></footer></body></html>`;
 
     let frag = []; const title = rpath === '/' ? '' : ' - ' + rpath;
@@ -496,6 +590,11 @@ const arrayToHtml = function (rpath, files) {
 };
 
 export default {
+    /**
+     * @param {Request} request
+     * @param {Env} env
+     * @param {Ctx} ctx
+     */
     async fetch(request, env, ctx) {
         const { protocol, pathname } = new URL(request.url);
         let method = request.method.toUpperCase();
@@ -505,7 +604,7 @@ export default {
         if (pathname.indexOf('/desktop.ini') !== -1) return new Response(null, { status: 404 });
 
         try {
-            // Google Drive CDN bypass (Unauthenticated intentionally for serving media)
+            // Static
             if (pathname.startsWith('/_/')) {
                 let url = new URL(request.url); url.hostname = 'drive-thirdparty.googleusercontent.com'; url.pathname = url.pathname.slice(2);
                 let response = await fetch(new Request(url, request));
@@ -524,7 +623,7 @@ export default {
             if (!request.headers.has('Authorization')) {
                 return new Response('Authentication Required.', {
                     status: 401,
-                    headers: { 'WWW-Authenticate': 'Basic realm="' + config.name + '", charset="UTF-8"' }
+                    headers: { 'WWW-Authenticate': `Basic realm="${config.name}", charset="UTF-8"` }
                 });
             }
 
