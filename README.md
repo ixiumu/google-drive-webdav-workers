@@ -15,10 +15,13 @@ A Cloudflare Workers script that transforms Google Drive into a fully functional
 1. **Get Google Credentials & Refresh Token**:
    
    - **Method A: Use Default rclone Credentials (Easiest, but unstable)**
+
      If you use the `rclone` CLI tool to authorize Google Drive without providing a Client ID, it uses rclone's shared credentials by default. 
+
      *⚠️ Warning:* Because these credentials are shared globally among all rclone users, they frequently trigger Google's API rate limits (429 Too Many Requests). Your WebDAV server might become temporarily unavailable.
 
    - **Method B: Use Your Own Client ID (Highly Recommended for stability)**
+
      To avoid rate limits and ensure stable mounting, you should create your own credentials and use the `rclone` desktop app to extract the refresh token:
      1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and enable the **Google Drive API**.
      2. Create an **OAuth 2.0 Client ID** (select "Desktop app" as the application type) to get your `client_id` and `client_secret`.
@@ -30,10 +33,12 @@ A Cloudflare Workers script that transforms Google Drive into a fully functional
      8. Once completed, open your `rclone.conf` file (you can find its location by running `rclone config file`) and copy the `refresh_token`.
 
 2. **Deploy to Cloudflare**:
+
    - Create a new Worker and paste the `dist/worker.js` code.
    - **Recommended:** Configure your credentials and settings using Environment Variables (see section below) instead of modifying the `dist/worker.js` file directly.
 
 3. **(Optional) KV Caching**:
+
    - Create a KV Namespace named `KV`.
    - Bind it to your Worker in "Settings -> Variables -> KV Namespace Bindings".
 
