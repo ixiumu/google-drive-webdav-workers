@@ -1,7 +1,4 @@
-// @ts-check
-/// <reference path='./types.d.ts' />
-
-var config = {
+var config: AppConfig = {
     client_id: '202264815644.apps.googleusercontent.com', // Google API Client ID
     client_secret: 'X4Z3ca8xfWDb1Voo-F9a7ZxJ', // Google API Client Secret
     refresh_token: '', // Google Drive API Refresh Token
@@ -25,20 +22,18 @@ var config = {
     }
 };
 
-const pathJoin = (...args) => args.join('/').replace(/\\/g, '/').replace(/(?<!^)\/+/g, '/').replace(/\/\//g, '/');
-const getUrl = (url) => ({ rpath: decodeURIComponent(new URL(url).pathname), fpath: pathJoin(config.working_dir, decodeURIComponent(new URL(url).pathname)) });
-const encodeQueryString = (data) => Object.keys(data).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(data[k])).join('&');
-const trimString = (string, char) => char ? string.replace(new RegExp('^\\' + char + '+|\\' + char + '+$', 'g'), '') : string.replace(/^\s+|\s+$/g, '');
-const formatSize = (n) => {
-    n = Math.round(n); if (n === 0) return '';
-    if (n < 1024) return n + 'B'; if (n < 1024 * 1024) return Math.round(n / 1024) + 'K';
-    return parseFloat((n / 1024 / 1024).toFixed(1)) + 'M';
+const pathJoin = (...args: string[]): string => args.join('/').replace(/\\/g, '/').replace(/(?<!^)\/+/g, '/').replace(/\/\//g, '/');
+const getUrl = (url: string): { rpath: string; fpath: string } => ({ rpath: decodeURIComponent(new URL(url).pathname), fpath: pathJoin(config.working_dir, decodeURIComponent(new URL(url).pathname)) });
+const encodeQueryString = (data: Record<string, any>): string => Object.keys(data).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(data[k])).join('&');
+const trimString = (string: string, char?: string): string => char ? string.replace(new RegExp('^\\' + char + '+|\\' + char + '+$', 'g'), '') : string.replace(/^\s+|\s+$/g, '');
+const formatSize = (n: number | string): string => {
+    let num = typeof n === 'string' ? parseFloat(n) : Math.round(n);
+    if (num === 0 || isNaN(num)) return '';
+    if (num < 1024) return num + 'B'; if (num < 1024 * 1024) return Math.round(num / 1024) + 'K';
+    return parseFloat((num / 1024 / 1024).toFixed(1)) + 'M';
 };
 
-/**
- * @param {Request} request
- */
-function basicAuthentication(request) {
+function basicAuthentication(request: Request): { user: string; pass: string } | null {
     const Authorization = request.headers.get('Authorization');
     if (!Authorization) return null;
     const [scheme, encoded] = Authorization.split(' ');
@@ -48,76 +43,58 @@ function basicAuthentication(request) {
     const index = decoded.indexOf(':');
     if (index === -1 || /[\0-\x1F\x7F]/.test(decoded)) return null;
     return { user: decoded.substring(0, index), pass: decoded.substring(index + 1) };
-};
+}
 
 class KVCache {
-    /**
-     * @param {Env} env
-     * @param {Ctx} ctx
-     */
-    constructor(env, ctx) {
+    env: Env;
+    ctx: ExecutionContext;
+
+    constructor(env: Env, ctx: ExecutionContext) {
         this.env = env;
         this.ctx = ctx;
     }
 
-    /**
-     * @param {string} k
-     * @param {string} ns
-     */
-    async get(k, ns) {
+    async get(k: string, ns: string): Promise<any> {
         const now = Date.now();
-        if (config.cache[ns] && config.cache[ns][k]) {
-            if (config.cache[ns][k].expire > now) {
-                return config.cache[ns][k].data;
+        if (config.cache[ns] && config.cache[ns]![k]) {
+            if (config.cache[ns]![k].expire > now) {
+                return config.cache[ns]![k].data;
             }
         }
         if (this.env && this.env.KV) {
             const v = await this.env.KV.get(ns + '.' + k, { type: 'json' });
             if (v) {
                 if (!config.cache[ns]) config.cache[ns] = {};
-                config.cache[ns][k] = { data: v, expire: now + 300000 };
+                config.cache[ns]![k] = { data: v, expire: now + 300000 };
                 return v;
             }
         }
         return null;
     }
 
-    /**
-     * @param {string} k
-     * @param {any} v
-     * @param {string} ns
-     * @param {number} [customTtl]
-     */
-    async put(k, v, ns, customTtl) {
+    async put(k: string, v: any, ns: string, customTtl?: number): Promise<void> {
         if (v) {
             if (!config.cache[ns]) config.cache[ns] = {};
             const ttl = customTtl || 300000;
-            config.cache[ns][k] = { data: v, expire: Date.now() + ttl };
+            config.cache[ns]![k] = { data: v, expire: Date.now() + ttl };
             if (this.env && this.env.KV && this.ctx) {
                 this.ctx.waitUntil(this.env.KV.put(ns + '.' + k, JSON.stringify(v), { expirationTtl: Math.max(60, Math.floor(ttl / 1000)) }));
             }
         }
     }
 
-    /**
-     * @param {string} k
-     * @param {string} ns
-     */
-    async delete(k, ns) {
+    async delete(k: string, ns: string): Promise<void> {
         if (ns === 'meta' && !k.endsWith('/')) k += '/';
         if (ns === 'meta' && k === '/') return;
-        if (config.cache[ns] && config.cache[ns][k]) {
-            delete config.cache[ns][k];
+        if (config.cache[ns] && config.cache[ns]![k]) {
+            delete config.cache[ns]![k];
         }
         if (this.env && this.env.KV && this.ctx) {
             this.ctx.waitUntil(this.env.KV.delete(ns + '.' + k));
         }
     }
 
-    /**
-     * @param {string} fpath
-     */
-    async invalidateFileAndParent(fpath) {
+    async invalidateFileAndParent(fpath: string): Promise<void> {
         await this.delete(fpath, 'meta');
         const tok = fpath.split('/');
         tok.pop();
@@ -127,46 +104,38 @@ class KVCache {
 }
 
 class StatusError extends Error {
-    /**
-     * @param {string} message
-     * @param {number} status
-     */
-    constructor(message, status) {
+    status: number;
+    code?: number;
+
+    constructor(message: string, status: number) {
         super(message);
         this.status = status;
     }
 }
 
 class GDrive {
-    /**
-     * @param {KVCache} cache
-     */
-    constructor(cache) {
+    cache: KVCache;
+
+    constructor(cache: KVCache) {
         this.cache = cache;
     }
 
-    /**
-     * @param {Request} request
-     */
-    async OPTIONS(request) {
+    async OPTIONS(request: Request): Promise<Response> {
         let allowed_methods = ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PROPFIND', 'MKCOL', 'DELETE', 'MOVE', 'COPY'].join(',');
         return new Response(null, { status: 200, headers: { 'Allow': allowed_methods, 'DAV': '1, 2, 3', 'MS-Author-Via': 'DAV', 'Accept-Ranges': 'bytes' } });
     }
 
-    /**
-     * @param {Request} request
-     */
-    async PROPFIND(request) {
+    async PROPFIND(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
-        let content;
+        let content: string;
         if (metadata.mimeType === 'application/vnd.google-apps.folder') {
             const depth = request.headers.get('Depth');
             if (depth && depth === '1') {
                 const objects = await this.getObjects(metadata.id);
-                let files = [];
+                let files: Partial<DriveFile>[] = [];
                 for (let i = 0; i < objects.length; i++) {
                     let object = objects[i];
                     files.push({ name: object.name, dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toUTCString(), size: object.size ? object.size : 0 });
@@ -181,17 +150,14 @@ class GDrive {
         return new Response(content, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
 
-    /**
-     * @param {Request} request
-     */
-    async MKCOL(request) {
+    async MKCOL(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') fpath = fpath.slice(0, -1);
 
         let metadata = await this.getMetadata(fpath);
         if (metadata) return new Response('<d:error xmlns:d="DAV:" xmlns:td="https://www.contoso.com/schema/"><td:exception>MethodNotAllowed</td:exception><td:message>The resource you tried to create already exists</td:message></d:error>', { status: 405 });
 
-        const tok = fpath.split('/'); const name = tok.pop(); const parent = tok.join('/');
+        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
         let parentMetadata = await this.getMetadata(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
 
@@ -209,19 +175,16 @@ class GDrive {
         return new Response(null, { status: 422 });
     }
 
-    /**
-     * @param {Request} request
-     */
-    async GET(request) {
+    async GET(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         let url = new URL(request.url);
-        let response;
+        let response: Response;
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             try {
                 if (metadata.mimeType === 'application/vnd.google-apps.folder') {
                     const objects = await this.getObjects(metadata.id);
-                    let files = [];
+                    let files: Partial<DriveFile>[] = [];
                     for (let i = 0; i < objects.length; i++) {
                         let object = objects[i];
                         files.push({ name: trimString(object.name, '/'), dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toISOString().split('T')[0], size: object.size ? object.size : 0, iconLink: object.iconLink });
@@ -238,30 +201,27 @@ class GDrive {
                 const range = request.headers.get('Range');
                 response = await this.getRawContent(metadata.id, range, abuse);
                 if (response.status >= 400) {
-                    const result = await response.json();
+                    const result: any = await response.json();
                     if (!abuse && response.status === 403 && result.error.errors[0].reason === 'cannotDownloadAbusiveFile') {
                         return Response.redirect(url.origin + url.pathname + '?abuse=true', 302);
                     }
                     throw new StatusError(result.error.message, response.status);
                 }
-            } catch (e) { return new Response(e.message, { status: 500 }); }
+            } catch (e: any) { return new Response(e.message, { status: 500 }); }
         } else { response = new Response(null, { status: 404 }); }
         return response;
     }
 
-    /**
-     * @param {Request} request
-     */
-    async PUT(request) {
+    async PUT(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') return new Response(null, { status: 405 });
         const contentLength = request.headers.get('Content-Length') || '0';
 
         let putUrl = await this.cache.get(fpath, 'putUrl');
-        let parentMetadata;
+        let parentMetadata: any;
 
         if (!putUrl) {
-            const tok = fpath.split('/'); const name = tok.pop(); const parent = tok.join('/');
+            const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
             parentMetadata = await this.getMetadata(parent);
             if (!parentMetadata) return new Response(null, { status: 404 });
 
@@ -293,10 +253,7 @@ class GDrive {
         return new Response(response.status <= 201 ? null : JSON.stringify(response), { status: response.status <= 201 ? 201 : response.status });
     }
 
-    /**
-     * @param {Request} request
-     */
-    async MOVE(request) {
+    async MOVE(request: Request): Promise<Response | undefined> {
         let { rpath, fpath } = getUrl(request.url);
         if (rpath === '/') return new Response(null, { status: 403 });
         let destination = request.headers.get('Destination');
@@ -305,10 +262,10 @@ class GDrive {
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
-        const tok = fpath.split('/'); const name = tok.pop(); const parent = tok.join('/');
-        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop(); const dest_parent = dest_tok.join('/');
+        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop()!; const dest_parent = dest_tok.join('/');
 
-        let patchUrl;
+        let patchUrl: string | undefined;
         let originalParentId = metadata.parents && metadata.parents.length > 0 ? metadata.parents[0] : null;
         let destParentId = originalParentId;
 
@@ -325,7 +282,7 @@ class GDrive {
             body: name !== dest_name ? JSON.stringify({ name: dest_name }) : null
         });
 
-        const result = await response.json();
+        const result: any = await response.json();
         if (result.id) {
             await this.cache.invalidateFileAndParent(fpath);
             await this.cache.delete(dest_parent, 'meta');
@@ -337,10 +294,7 @@ class GDrive {
         }
     }
 
-    /**
-     * @param {Request} request
-     */
-    async COPY(request) {
+    async COPY(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
@@ -349,8 +303,8 @@ class GDrive {
         let dest_fpath = pathJoin(config.working_dir, dest_rpath);
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
-        const tok = fpath.split('/'); const name = tok.pop(); const parent = tok.join('/');
-        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop(); const dest_parent = dest_tok.join('/');
+        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop()!; const dest_parent = dest_tok.join('/');
 
         let parents = metadata.parents;
         let destParentId = null;
@@ -375,10 +329,7 @@ class GDrive {
         return new Response(null, { status: 201 });
     }
 
-    /**
-     * @param {Request} request
-     */
-    async DELETE(request) {
+    async DELETE(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         if (rpath === '/') return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
@@ -394,42 +345,35 @@ class GDrive {
         return new Response(null, { status: 404 });
     }
 
-    /**
-     * @param {Request} request
-     */
-    async HEAD(request) {
+    async HEAD(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true', { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
-            const result = await response.json();
+            const result: any = await response.json();
             if (result) return new Response(null, { status: 200, headers: { 'Content-Length': result.size, 'Content-Type': result.mimeType, 'date': new Date(result.modifiedTime).toUTCString() } });
         }
         return new Response(null, { status: 404 });
     }
 
-    async LOCK() { return new Response(null, { status: 200 }); }
-    async UNLOCK() { return new Response(null, { status: 200 }); }
-    async PROPPATCH() { return new Response(null, { status: 200 }); }
+    async LOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
+    async UNLOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
+    async PROPPATCH(): Promise<Response> { return new Response(null, { status: 200 }); }
 
-    // API Helper Methods
-    /**
-     * @param {string} path
-     */
-    async getMetadata(path) {
+    async getMetadata(path: string): Promise<any> {
         path = path.startsWith('/') ? path : '/' + path;
         path = path.endsWith('/') ? path : path + '/';
         let meta = await this.cache.get(path, 'meta');
         if (meta) return meta;
 
         let fullpath = '/';
-        let metadata = (config.cache.meta[fullpath] && config.cache.meta[fullpath].data) || null;
+        let metadata = (config.cache.meta['/'] && config.cache.meta['/'].data) || null;
         if (!metadata) return null;
 
         const fragments = trimString(path, '/').split('/');
 
         for (let name of fragments) {
-            if (!name) continue; // Safe guard for root path fragments
+            if (!name) continue;
             fullpath += name + '/';
             meta = await this.cache.get(fullpath, 'meta');
             if (!meta) {
@@ -452,15 +396,12 @@ class GDrive {
         return metadata;
     }
 
-    /**
-     * @param {string} id
-     */
-    async getObjects(id) {
+    async getObjects(id: string): Promise<any[]> {
         let cachedList = await this.cache.get(id, 'objects');
         if (cachedList) return cachedList;
 
-        let pageToken; const list = [];
-        const params = {
+        let pageToken: string | undefined; const list: any[] = [];
+        const params: any = {
             pageSize: 1000,
             includeItemsFromAllDrives: true,
             supportsAllDrives: true,
@@ -479,28 +420,20 @@ class GDrive {
         return list;
     }
 
-    /**
-     * @param {string} id
-     * @param {string|null} range
-     * @param {boolean} abuse
-     */
-    async getRawContent(id, range, abuse) {
-        const headers = { Authorization: 'Bearer ' + (await this.getAccessToken()) };
+    async getRawContent(id: string, range: string | null, abuse: boolean): Promise<Response> {
+        const headers: Record<string, string> = { Authorization: 'Bearer ' + (await this.getAccessToken()) };
         if (range) headers['Range'] = range;
         const url = new URL(`https://www.googleapis.com/drive/v3/files/${id}`);
         url.searchParams.set('supportsAllDrives', 'true');
         url.searchParams.set('alt', 'media');
         url.searchParams.set('acknowledgeAbuse', abuse ? 'true' : 'false');
-        return await fetch(url, { headers });
+        return await fetch(url.toString(), { headers });
     }
 
-    /**
-     * @param {QueryParams} params
-     */
-    async queryDrive(params, retryCount = 0) {
+    async queryDrive(params: Record<string, any>, retryCount: number = 0): Promise<any> {
         const driveUrl = 'https://www.googleapis.com/drive/v3/files?' + encodeQueryString(params);
         const response = await fetch(driveUrl, { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
-        const result = await response.json();
+        const result: any = await response.json();
 
         if (result.error) {
             const errMsg = result.error.message || '';
@@ -513,36 +446,28 @@ class GDrive {
         return result;
     }
 
-    /**
-     * @returns {Promise<VFile['quota']>}
-     */
-    async getQuota() {
+    async getQuota(): Promise<{ available: number | string; used: number | string } | undefined> {
         const response = await fetch('https://www.googleapis.com/drive/v3/about?fields=storageQuota', { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
-        const result = await response.json();
+        const result: any = await response.json();
         if (result.storageQuota) return { available: result.storageQuota.limit - result.storageQuota.usage, used: result.storageQuota.usage };
     }
 
-    async getAccessToken() {
+    async getAccessToken(): Promise<string> {
         let token = await this.cache.get('token', 'config');
         if (token && token.expires && token.expires > Date.now()) return token.access_token;
         const response = await fetch('https://www.googleapis.com/oauth2/v4/token', {
             method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: encodeQueryString({ client_id: config.client_id, client_secret: config.client_secret, refresh_token: config.refresh_token, grant_type: 'refresh_token' })
         });
-        const result = await response.json();
+        const result: any = await response.json();
         if (result.error) { throw new StatusError(result.error_description, response.status); }
         await this.cache.put('token', { expires: Date.now() + 3500 * 1000, access_token: result.access_token }, 'config', 3500 * 1000);
         return result.access_token;
     }
 }
 
-/**
- * @param {string} rpath
- * @param {VFile[]} files
- * @param {string} [cursor]
- */
-function arrayToXml(rpath, files, cursor) {
-    let entries = [];
+function arrayToXml(rpath: string, files: Partial<DriveFile>[], cursor?: string): string {
+    let entries: string[] = [];
     for (let i = 0; i < files.length; i++) {
         let file = files[i];
         if (!file.lastmodified) file.lastmodified = new Date().toUTCString();
@@ -562,40 +487,31 @@ function arrayToXml(rpath, files, cursor) {
     }
     let new_cursor = cursor ? `<td:cursor>${cursor}</td:cursor>` : '';
     return `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:" xmlns:R="https://www.contoso.com/schema/">${entries.join('\n')}${new_cursor}</d:multistatus>`;
-};
+}
 
-/**
- * @param {string} rpath
- * @param {any[]} files
- */
-function arrayToHtml(rpath, files) {
+function arrayToHtml(rpath: string, files: Partial<DriveFile>[]): string {
     const tpl = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/><link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAApVBMVEUAAAD///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////+4/eNVAAAANnRSTlMA9isRpA3y8NfOoQjl3amJgVcX2sm/cUAw+MO6s5ttOhsU+urfrZB6dWZQRCPSlUsyBeueYCQaPAIhAAABdUlEQVQ4y23S2WKCQAwF0EsRkMWyivvWqrVqF7vc//+0mjhQRM9TkoEZJgENi/l34bp+UB5wx6n0WesmDlrSiFe+XnEl0OoTG6bNTcZUh4eLF81yG5VCC7vZtCp0tdALTdrR1AK4N5UhVR9qT5UCCXH1DktNXI0LCbnFRTiiks+YUx2lfuAKqqrG57Cn0QzKL2CsteyFWGgwcszWHOBiQLVHSVH3bdSrook5Y6Y3bnT0w4SZuamOaGGKD+f4GUYsKxGk/3UH9emkyjxpnz5Q3S2lyhrfaUnbX2Dwws9WK9t2HPTliOD/0He6lmCe592zN58cY0drUU1o4NgiO098OPz8/J2SWzkogvI2uBZ6OsKI3En6SrSMScsB5PeRRnPeWv+QEZnJboDARcszyaUEPxpw2FpPtGfVWMb9bWt9SfLNxCf5JTadThB0xKNak14Gw855h3dEzZnwRrFEU2m11hO0ZHHU2P39iFthGk96rrvux6mN2h80rVPh8HjxPAAAAABJRU5ErkJggg=="/><title>${config.name}{{title}}</title><style>*{box-sizing:border-box}body{font:15px/1.3 Helvetica,Arial;background:#0E1117;color:#CAD1D9}h1,main{background:#0E1117;max-width:960px;margin:10px auto;border-radius:5px}h1{font-size:18px;padding:15px;border:#22262D 1px solid;color:#DDD;background:#171b22}a{color:inherit;text-decoration:none}h1 a,main a{display:flex;align-items:center}main a:first-child{border-top-left-radius:5px;border-top-right-radius:5px}main a:last-child{border-bottom-left-radius:5px;border-bottom-right-radius:5px}svg{margin-right:15px;fill:#F1F6FC}h1:hover{color:#BABBBD}main{border:#22262D 1px solid}main img{margin-right:10px}main a{padding:12px 15px;border-bottom:#22262D 1px solid;transition:all .3s}main a:last-child{border:0}main a:hover{background:#171B22;color:#58a6ff}main a>div{margin-left:10px}main a>div:first-child{flex:1;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center}main a>div:not(:first-child){color:#8C949E;font-size:13px}footer{text-align:center;color:#8C949E;font-size:13px}footer a:hover{text-decoration:underline}@media (max-width:640px){main a>div:last-child{display:none}}</style></head><body><h1><a href="/"><svg width="32" height="32" viewBox="0 0 320 320"><path d="M95 304 c-47 -24 -71 -51 -84 -95 -26 -87 20 -173 107 -199 145 -44 262 135 165 251 -48 56 -128 75 -188 43z m168 -73 c9 -16 17 -32 17 -35 0 -3 -35 -6 -78 -6 -85 0 -78 -4 -110 63 -2 4 32 7 75 7 76 0 79 -1 96 -29z m-149 -46 c38 -65 38 -65 16 -100 -22 -36 -22 -36 -62 32 -40 68 -40 68 -22 101 9 17 20 32 23 32 4 0 24 -29 45 -65z m166 -9 c0 -12 -75 -129 -86 -133 -7 -2 -26 -3 -42 -1 -30 3 -30 3 9 71 39 65 41 67 79 67 22 0 40 -2 40 -4z" /></svg>${config.name}</a></h1><main>{{content}}</main><footer><a target="_blank" href="${config.copyright_link}">${config.copyright}</a></footer></body></html>`;
 
-    let frag = []; const title = rpath === '/' ? '' : ' - ' + rpath;
+    let frag: string[] = []; const title = rpath === '/' ? '' : ' - ' + rpath;
     if (rpath !== '/') frag.push(`<a href="../"><div><img src="/_/16/type/application/vnd.google-apps.folder"><b>../</b></div></a>`);
 
     if (files) {
         for (let i = 0; i < files.length; i++) {
             let entry = files[i];
-            entry.iconLink = entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/');
+            let iconLink = entry.iconLink ? entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/') : '';
             let modTime = entry.lastmodified ? `<div>${new Date(entry.lastmodified).toISOString().split('T')[0]}</div>` : '';
             if (entry.dir) {
-                frag.push(`<a href="${entry.name}/"><div><img src="${entry.iconLink}"/><b>${entry.name}</b></div>${modTime}</a>`);
+                frag.push(`<a href="${entry.name}/"><div><img src="${iconLink}"/><b>${entry.name}</b></div>${modTime}</a>`);
             } else {
-                frag.push(`<a href="${entry.name}" target="_blank"><div><img src="${entry.iconLink}"/>${entry.name}</div><div>${formatSize(entry.size)}</div>${modTime}</a>`);
+                frag.push(`<a href="${entry.name}" target="_blank"><div><img src="${iconLink}"/>${entry.name}</div><div>${formatSize(entry.size || 0)}</div>${modTime}</a>`);
             }
         }
     }
     return tpl.trim().replace(/{{content}}/, frag.join('')).replace(/{{title}}/, title);
-};
+}
 
 export default {
-    /**
-     * @param {Request} request
-     * @param {Env} env
-     * @param {Ctx} ctx
-     */
-    async fetch(request, env, ctx) {
+    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const { protocol, pathname } = new URL(request.url);
         let method = request.method.toUpperCase();
 
@@ -607,7 +523,7 @@ export default {
             // Static
             if (pathname.startsWith('/_/')) {
                 let url = new URL(request.url); url.hostname = 'drive-thirdparty.googleusercontent.com'; url.pathname = url.pathname.slice(2);
-                let response = await fetch(new Request(url, request));
+                let response = await fetch(new Request(url.toString(), request));
                 response = new Response(response.body, response);
                 response.headers.set('Access-Control-Allow-Origin', '*');
                 response.headers.set('Cache-Control', 'public, max-age=16768000');
@@ -630,13 +546,13 @@ export default {
                             console.log(error);
                         }
                     } else if (typeof env.USERS === 'object') {
-                        config.users = env.USERS;
+                        config.users = env.USERS as Record<string, string>;
                     }
                 }
                 if (env.CLIENT_ID) config.client_id = env.CLIENT_ID;
                 if (env.CLIENT_SECRET) config.client_secret = env.CLIENT_SECRET;
                 if (env.REFRESH_TOKEN) config.refresh_token = env.REFRESH_TOKEN;
-                if (env.ROOT_ID) config.cache.meta['/'].data.id = env.ROOT_ID;
+                if (env.ROOT_ID) config.cache.meta['/']!.data.id = env.ROOT_ID;
                 if (env.NAME) config.name = env.NAME;
                 if (env.COPYRIGHT) config.copyright = env.COPYRIGHT;
                 if (env.COPYRIGHT_LINK) config.copyright_link = env.COPYRIGHT_LINK;
@@ -663,13 +579,13 @@ export default {
             // Method Routing
             if (method === 'PATCH') method = 'COPY';
 
-            if (typeof drive[method] === 'function') {
-                return await drive[method](request);
+            if (typeof (drive as any)[method] === 'function') {
+                return await (drive as any)[method](request);
             }
 
             return new Response('Method Not Allowed', { status: 405 });
 
-        } catch (e) {
+        } catch (e: any) {
             const status = e.status || e.code || 500;
             return new Response(status + ': ' + e.message, { status });
         }

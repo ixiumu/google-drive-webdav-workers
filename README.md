@@ -30,8 +30,8 @@ A Cloudflare Workers script that transforms Google Drive into a fully functional
      8. Once completed, open your `rclone.conf` file (you can find its location by running `rclone config file`) and copy the `refresh_token`.
 
 2. **Deploy to Cloudflare**:
-   - Create a new Worker and paste the `worker.js` code.
-   - **Recommended:** Configure your credentials and settings using Environment Variables (see section below) instead of modifying the `worker.js` file directly.
+   - Create a new Worker and paste the `dist/worker.js` code.
+   - **Recommended:** Configure your credentials and settings using Environment Variables (see section below) instead of modifying the `dist/worker.js` file directly.
 
 3. **(Optional) KV Caching**:
    - Create a KV Namespace named `KV`.

@@ -1,55 +1,49 @@
-interface KVNamespace {
-    get(
-        key: string,
-        options?: {
-            type?: 'text' | 'json' | 'arrayBuffer' | 'stream';
-            cacheTtl?: number;
-        }
-    ): Promise<any>;
-    put(
-        key: string,
-        value: any,
-        options?: {
-            expiration?: number;
-            expirationTtl?: number;
-            metadata?: any;
-        }
-    ): Promise<void>;
-    delete(key: string): Promise<void>;
-}
-
-interface Env {
-    KV: KVNamespace;
-    USERS: string;
-    CLIENT_ID: string;
-    CLIENT_SECRET: string;
-    REFRESH_TOKEN: string;
-    ROOT_ID: string;
-    NAME: string;
-    COPYRIGHT: string;
-    COPYRIGHT_LINK: string;
-}
-
-interface Ctx {
-    waitUntil(promise: Promise<any>): void;
-}
-
-interface QueryParams {
-    includeItemsFromAllDrives: boolean;
-    supportsAllDrives: boolean;
-    q: string;
-    fields: string;
-    pageSize?: number;
-    orderBy?: string;
-}
-
-interface VFile {
+interface AppConfig {
+    client_id: string;
+    client_secret: string;
+    refresh_token: string;
     name: string;
-    dir: boolean;
-    size: number;
+    copyright: string;
+    copyright_link: string;
+    users: Record<string, string>;
+    env: boolean;
+    working_dir: string;
+    cache: {
+        meta: Record<string, CacheItem>;
+        putUrl: Record<string, CacheItem<string>>;
+        config: Record<string, CacheItem>;
+        [key: string]: Record<string, CacheItem> | undefined;
+    };
+}
+
+interface DriveFile {
+    id: string;
+    name: string;
+    mimeType: string;
+    size?: number | string;
+    modifiedTime: string | null;
+    description?: string;
+    iconLink?: string;
+    thumbnailLink?: string;
+    imageMediaMetadata?: any;
+    parents?: string[];
+    dir?: boolean;
     lastmodified?: string | null;
-    quota?: {
-        used: number;
-        available: number;
-    } | null;
+    quota?: { used: number | string; available: number | string } | null;
+}
+
+interface DriveFile {
+    id: string;
+    name: string;
+    mimeType: string;
+    size?: number | string;
+    modifiedTime: string | null;
+    description?: string;
+    iconLink?: string;
+    thumbnailLink?: string;
+    imageMediaMetadata?: any;
+    parents?: string[];
+    dir?: boolean;
+    lastmodified?: string | null;
+    quota?: { used: number | string; available: number | string } | null;
 }

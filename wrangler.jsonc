@@ -1,0 +1,15 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "google-drive-webdav-workers",
+	"main": "src/worker.ts",
+	"compatibility_date": "2026-04-15",
+	"upload_source_maps": false,
+	"send_metrics": false,
+	"minify": true,
+	"kv_namespaces": [
+		{
+			"binding": "KV",
+			"id": "google-drive-webdav-kv"
+		}
+	]
+}

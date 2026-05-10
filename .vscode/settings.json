@@ -1,0 +1,10 @@
+{
+    "json.schemas": [
+        {
+            "fileMatch": [
+                "/wrangler.jsonc"
+            ],
+            "url": "./node_modules/wrangler/config-schema.json"
+        }
+    ]
+}
