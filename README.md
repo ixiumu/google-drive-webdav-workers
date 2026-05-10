@@ -45,8 +45,8 @@ The Worker supports the following variables:
 
 | Variable | Required | Description | Example |
 | :--- | :---: | :--- | :--- |
-| `CLIENT_ID` | **Yes** | Google cloud OAuth client id. | `*.apps.googleusercontent.com` |
-| `CLIENT_SECRET` | **Yes** | Google cloud OAuth client secret . | `GOCSPX-...` |
+| `CLIENT_ID` | **Yes** | Google Cloud OAuth client id. | `*.apps.googleusercontent.com` |
+| `CLIENT_SECRET` | **Yes** | Google Cloud OAuth client secret . | `GOCSPX-...` |
 | `REFRESH_TOKEN` | **Yes** | Your Google Drive API Refresh Token. | `1//04x...` |
 | `USERS` | **Yes** | A JSON formatted string containing your WebDAV usernames and passwords. | `{"admin": "mypassword"}` |
 | `ROOT_ID` | No | Specific Google Drive Folder ID to mount as root. Defaults to your entire drive. | `1B2a_xYz...` |
