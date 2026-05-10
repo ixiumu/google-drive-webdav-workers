@@ -1,3 +1,5 @@
+declare var CONFIG: Partial<AppConfig> | undefined;
+
 interface AppConfig {
     client_id: string;
     client_secret: string;

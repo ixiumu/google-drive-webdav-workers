@@ -23,8 +23,10 @@ var config: AppConfig = {
     }
 };
 
+if (typeof CONFIG !== 'undefined') Object.assign(config, CONFIG);
+
 const pathJoin = (...args: string[]): string => args.join('/').replace(/\\/g, '/').replace(/(?<!^)\/+/g, '/').replace(/\/\//g, '/');
-const encodeQueryString = (data: Record<string, any>): string => Object.keys(data).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(data[k])).join('&');
+const encodeQueryString = (data: Record<string, string>): string => Object.keys(data).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(data[k])).join('&');
 const trimString = (string: string, char?: string): string => char ? string.replace(new RegExp('^\\' + char + '+|\\' + char + '+$', 'g'), '') : string.replace(/^\s+|\s+$/g, '');
 const formatSize = (n: number | string): string => {
     let num = typeof n === 'string' ? parseFloat(n) : Math.round(n);
@@ -156,7 +158,7 @@ class GDrive {
                 }
                 content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: null, size: 0 }, ...(files || [])], '');
             } else {
-                content = arrayToXml(rpath, [{ name: rpath, dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: fpath === '/' ? await this.getQuota() : null }]);
+                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: fpath === '/' ? await this.getQuota() : null }]);
             }
         } else {
             content = arrayToXml(rpath, [{ name: '', dir: false, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size }]);
