@@ -115,9 +115,10 @@ class StatusError extends Error {
 
 class GDrive {
     cache: KVCache;
+    static fetchingTokenPromise: Promise<string> | null = null;
 
-    constructor(cache: KVCache) {
-        this.cache = cache;
+    constructor(env: Env, ctx: ExecutionContext<unknown>) {
+        this.cache = new KVCache(env, ctx);
     }
 
     async OPTIONS(request: Request): Promise<Response> {
@@ -215,7 +216,7 @@ class GDrive {
     async PUT(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') return new Response(null, { status: 405 });
-        const contentLength = request.headers.get('Content-Length') || '0';
+        const contentLength = request.headers.get('Content-Length');
 
         let putUrl = await this.cache.get(fpath, 'putUrl');
         let parentMetadata: any;
@@ -230,7 +231,7 @@ class GDrive {
                 await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
             }
 
-            let response = await fetch(new Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
+            const response = await fetch(new Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
                 method: 'POST', headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
                 body: JSON.stringify({ name, parents: [parentMetadata.id] })
             }));
@@ -238,8 +239,10 @@ class GDrive {
             if (!putUrl) return new Response(JSON.stringify(response), { status: 403 });
             await this.cache.put(fpath, putUrl, 'putUrl');
         }
-
-        let response = await fetch(putUrl, { body: request.body, method: 'PUT', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()), 'Content-Length': contentLength } });
+        const headers = new Headers();
+        headers.set('Authorization', 'Bearer ' + (await this.getAccessToken()));
+        if (contentLength) headers.set('Content-Length', contentLength);
+        const response = await fetch(putUrl, { body: request.body, method: 'PUT', headers });
         if (response.status !== 409) {
             await this.cache.delete(fpath, 'putUrl');
             await this.cache.invalidateFileAndParent(fpath);
@@ -455,14 +458,37 @@ class GDrive {
     async getAccessToken(): Promise<string> {
         let token = await this.cache.get('token', 'config');
         if (token && token.expires && token.expires > Date.now()) return token.access_token;
-        const response = await fetch('https://www.googleapis.com/oauth2/v4/token', {
-            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: encodeQueryString({ client_id: config.client_id, client_secret: config.client_secret, refresh_token: config.refresh_token, grant_type: 'refresh_token' })
-        });
-        const result: any = await response.json();
-        if (result.error) { throw new StatusError(result.error_description, response.status); }
-        await this.cache.put('token', { expires: Date.now() + 3500 * 1000, access_token: result.access_token }, 'config', 3500 * 1000);
-        return result.access_token;
+        if (GDrive.fetchingTokenPromise) {
+            return await GDrive.fetchingTokenPromise;
+        }
+        GDrive.fetchingTokenPromise = (async () => {
+            try {
+                const response = await fetch('https://www.googleapis.com/oauth2/v4/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: encodeQueryString({
+                        client_id: config.client_id,
+                        client_secret: config.client_secret,
+                        refresh_token: config.refresh_token,
+                        grant_type: 'refresh_token'
+                    })
+                });
+                const result: any = await response.json();
+                if (result.error) {
+                    throw new StatusError(result.error_description, response.status);
+                }
+                await this.cache.put(
+                    'token',
+                    { expires: Date.now() + 3500 * 1000, access_token: result.access_token },
+                    'config',
+                    3500 * 1000
+                );
+                return result.access_token;
+            } finally {
+                GDrive.fetchingTokenPromise = null;
+            }
+        })();
+        return await GDrive.fetchingTokenPromise;
     }
 }
 
@@ -572,9 +598,7 @@ export default {
                 return new Response('Unauthorized', { status: 401 });
             }
 
-            // Initialize Context for this Request
-            const cache = new KVCache(env, ctx);
-            const drive = new GDrive(cache);
+            const drive = new GDrive(env, ctx);
 
             // Method Routing
             if (method === 'PATCH') method = 'COPY';
