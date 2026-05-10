@@ -3,6 +3,7 @@ var config: AppConfig = {
     client_secret: 'X4Z3ca8xfWDb1Voo-F9a7ZxJ', // Google API Client Secret
     refresh_token: '', // Google Drive API Refresh Token
 
+    path: '/dav/',
     name: 'My Cloud Drive', // Display name for the web interface
     copyright: '@ixiumu', // Copyright text displayed in the footer
     copyright_link: 'https://github.com/ixiumu/google-drive-webdav-workers', // URL link for the footer
@@ -23,7 +24,6 @@ var config: AppConfig = {
 };
 
 const pathJoin = (...args: string[]): string => args.join('/').replace(/\\/g, '/').replace(/(?<!^)\/+/g, '/').replace(/\/\//g, '/');
-const getUrl = (url: string): { rpath: string; fpath: string } => ({ rpath: decodeURIComponent(new URL(url).pathname), fpath: pathJoin(config.working_dir, decodeURIComponent(new URL(url).pathname)) });
 const encodeQueryString = (data: Record<string, any>): string => Object.keys(data).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(data[k])).join('&');
 const trimString = (string: string, char?: string): string => char ? string.replace(new RegExp('^\\' + char + '+|\\' + char + '+$', 'g'), '') : string.replace(/^\s+|\s+$/g, '');
 const formatSize = (n: number | string): string => {
@@ -31,6 +31,19 @@ const formatSize = (n: number | string): string => {
     if (num === 0 || isNaN(num)) return '';
     if (num < 1024) return num + 'B'; if (num < 1024 * 1024) return Math.round(num / 1024) + 'K';
     return parseFloat((num / 1024 / 1024).toFixed(1)) + 'M';
+};
+
+const getUrl = (url: string): { rpath: string; fpath: string } => {
+    const rpath = decodeURIComponent(new URL(url, 'http://localhost').pathname);
+    let fpath_relative = rpath;
+    const basePath = config.path.endsWith('/') ? config.path : config.path + '/';
+    if (basePath !== '/' && fpath_relative.startsWith(basePath)) {
+        fpath_relative = '/' + fpath_relative.substring(basePath.length);
+    }
+    return {
+        rpath,
+        fpath: pathJoin(config.working_dir, fpath_relative)
+    };
 };
 
 function basicAuthentication(request: Request): { user: string; pass: string } | null {
@@ -143,7 +156,7 @@ class GDrive {
                 }
                 content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: null, size: 0 }, ...(files || [])], '');
             } else {
-                content = arrayToXml(rpath, [{ name: rpath, dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: rpath === '/' ? await this.getQuota() : null }]);
+                content = arrayToXml(rpath, [{ name: rpath, dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: fpath === '/' ? await this.getQuota() : null }]);
             }
         } else {
             content = arrayToXml(rpath, [{ name: '', dir: false, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size }]);
@@ -257,11 +270,11 @@ class GDrive {
     }
 
     async MOVE(request: Request): Promise<Response | undefined> {
-        let { rpath, fpath } = getUrl(request.url);
-        if (rpath === '/') return new Response(null, { status: 403 });
+        let { fpath } = getUrl(request.url);
+        if (fpath === '/') return new Response(null, { status: 403 });
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
-        const dest_fpath = pathJoin(config.working_dir, decodeURIComponent(new URL(destination).pathname));
+        const { fpath: dest_fpath } = getUrl(destination);
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
@@ -298,12 +311,11 @@ class GDrive {
     }
 
     async COPY(request: Request): Promise<Response> {
-        let { rpath, fpath } = getUrl(request.url);
+        let { fpath } = getUrl(request.url);
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
-        let dest_rpath = decodeURIComponent(new URL(destination).pathname);
-        if (dest_rpath === '/') return new Response(null, { status: 403 });
-        let dest_fpath = pathJoin(config.working_dir, dest_rpath);
+        const { fpath: dest_fpath } = getUrl(destination);
+        if (dest_fpath === '/') return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
         const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
@@ -333,8 +345,8 @@ class GDrive {
     }
 
     async DELETE(request: Request): Promise<Response> {
-        let { rpath, fpath } = getUrl(request.url);
-        if (rpath === '/') return new Response(null, { status: 403 });
+        let { fpath } = getUrl(request.url);
+        if (fpath === '/') return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
@@ -349,7 +361,7 @@ class GDrive {
     }
 
     async HEAD(request: Request): Promise<Response> {
-        let { rpath, fpath } = getUrl(request.url);
+        let { fpath } = getUrl(request.url);
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true', { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
@@ -516,11 +528,12 @@ function arrayToXml(rpath: string, files: Partial<DriveFile>[], cursor?: string)
 }
 
 function arrayToHtml(rpath: string, files: Partial<DriveFile>[]): string {
-    const tpl = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/><link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAApVBMVEUAAAD///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////+4/eNVAAAANnRSTlMA9isRpA3y8NfOoQjl3amJgVcX2sm/cUAw+MO6s5ttOhsU+urfrZB6dWZQRCPSlUsyBeueYCQaPAIhAAABdUlEQVQ4y23S2WKCQAwF0EsRkMWyivvWqrVqF7vc//+0mjhQRM9TkoEZJgENi/l34bp+UB5wx6n0WesmDlrSiFe+XnEl0OoTG6bNTcZUh4eLF81yG5VCC7vZtCp0tdALTdrR1AK4N5UhVR9qT5UCCXH1DktNXI0LCbnFRTiiks+YUx2lfuAKqqrG57Cn0QzKL2CsteyFWGgwcszWHOBiQLVHSVH3bdSrook5Y6Y3bnT0w4SZuamOaGGKD+f4GUYsKxGk/3UH9emkyjxpnz5Q3S2lyhrfaUnbX2Dwws9WK9t2HPTliOD/0He6lmCe592zN58cY0drUU1o4NgiO098OPz8/J2SWzkogvI2uBZ6OsKI3En6SrSMScsB5PeRRnPeWv+QEZnJboDARcszyaUEPxpw2FpPtGfVWMb9bWt9SfLNxCf5JTadThB0xKNak14Gw855h3dEzZnwRrFEU2m11hO0ZHHU2P39iFthGk96rrvux6mN2h80rVPh8HjxPAAAAABJRU5ErkJggg=="/><title>${config.name}{{title}}</title><style>*{box-sizing:border-box}body{font:15px/1.3 Helvetica,Arial;background:#0E1117;color:#CAD1D9}h1,main{background:#0E1117;max-width:960px;margin:10px auto;border-radius:5px}h1{font-size:18px;padding:15px;border:#22262D 1px solid;color:#DDD;background:#171b22}a{color:inherit;text-decoration:none}h1 a,main a{display:flex;align-items:center}main a:first-child{border-top-left-radius:5px;border-top-right-radius:5px}main a:last-child{border-bottom-left-radius:5px;border-bottom-right-radius:5px}svg{margin-right:15px;fill:#F1F6FC}h1:hover{color:#BABBBD}main{border:#22262D 1px solid}main img{margin-right:10px}main a{padding:12px 15px;border-bottom:#22262D 1px solid;transition:all .3s}main a:last-child{border:0}main a:hover{background:#171B22;color:#58a6ff}main a>div{margin-left:10px}main a>div:first-child{flex:1;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center}main a>div:not(:first-child){color:#8C949E;font-size:13px}footer{text-align:center;color:#8C949E;font-size:13px}footer a:hover{text-decoration:underline}@media (max-width:640px){main a>div:last-child{display:none}}</style></head><body><h1><a href="/"><svg width="32" height="32" viewBox="0 0 320 320"><path d="M95 304 c-47 -24 -71 -51 -84 -95 -26 -87 20 -173 107 -199 145 -44 262 135 165 251 -48 56 -128 75 -188 43z m168 -73 c9 -16 17 -32 17 -35 0 -3 -35 -6 -78 -6 -85 0 -78 -4 -110 63 -2 4 32 7 75 7 76 0 79 -1 96 -29z m-149 -46 c38 -65 38 -65 16 -100 -22 -36 -22 -36 -62 32 -40 68 -40 68 -22 101 9 17 20 32 23 32 4 0 24 -29 45 -65z m166 -9 c0 -12 -75 -129 -86 -133 -7 -2 -26 -3 -42 -1 -30 3 -30 3 9 71 39 65 41 67 79 67 22 0 40 -2 40 -4z" /></svg>${config.name}</a></h1><main>{{content}}</main><footer><a target="_blank" href="${config.copyright_link}">${config.copyright}</a></footer></body></html>`;
-
-    let frag: string[] = []; const title = rpath === '/' ? '' : ' - ' + rpath;
-    if (rpath !== '/') frag.push(`<a href="../"><div><img src="/_/16/type/application/vnd.google-apps.folder"><b>../</b></div></a>`);
-
+    const basePath = config.path.endsWith('/') ? config.path : config.path + '/';
+    const isRoot = rpath === basePath || rpath + '/' === basePath;
+    const title = isRoot ? '' : ' - ' + rpath;
+    const tpl = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/><link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAApVBMVEUAAAD///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////+4/eNVAAAANnRSTlMA9isRpA3y8NfOoQjl3amJgVcX2sm/cUAw+MO6s5ttOhsU+urfrZB6dWZQRCPSlUsyBeueYCQaPAIhAAABdUlEQVQ4y23S2WKCQAwF0EsRkMWyivvWqrVqF7vc//+0mjhQRM9TkoEZJgENi/l34bp+UB5wx6n0WesmDlrSiFe+XnEl0OoTG6bNTcZUh4eLF81yG5VCC7vZtCp0tdALTdrR1AK4N5UhVR9qT5UCCXH1DktNXI0LCbnFRTiiks+YUx2lfuAKqqrG57Cn0QzKL2CsteyFWGgwcszWHOBiQLVHSVH3bdSrook5Y6Y3bnT0w4SZuamOaGGKD+f4GUYsKxGk/3UH9emkyjxpnz5Q3S2lyhrfaUnbX2Dwws9WK9t2HPTliOD/0He6lmCe592zN58cY0drUU1o4NgiO098OPz8/J2SWzkogvI2uBZ6OsKI3En6SrSMScsB5PeRRnPeWv+QEZnJboDARcszyaUEPxpw2FpPtGfVWMb9bWt9SfLNxCf5JTadThB0xKNak14Gw855h3dEzZnwRrFEU2m11hO0ZHHU2P39iFthGk96rrvux6mN2h80rVPh8HjxPAAAAABJRU5ErkJggg=="/><title>${config.name}{{title}}</title><style>*{box-sizing:border-box}body{font:15px/1.3 Helvetica,Arial;background:#0E1117;color:#CAD1D9}h1,main{background:#0E1117;max-width:960px;margin:10px auto;border-radius:5px}h1{font-size:18px;padding:15px;border:#22262D 1px solid;color:#DDD;background:#171b22}a{color:inherit;text-decoration:none}h1 a,main a{display:flex;align-items:center}main a:first-child{border-top-left-radius:5px;border-top-right-radius:5px}main a:last-child{border-bottom-left-radius:5px;border-bottom-right-radius:5px}svg{margin-right:15px;fill:#F1F6FC}h1:hover{color:#BABBBD}main{border:#22262D 1px solid}main img{margin-right:10px}main a{padding:12px 15px;border-bottom:#22262D 1px solid;transition:all .3s}main a:last-child{border:0}main a:hover{background:#171B22;color:#58a6ff}main a>div{margin-left:10px}main a>div:first-child{flex:1;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center}main a>div:not(:first-child){color:#8C949E;font-size:13px}footer{text-align:center;color:#8C949E;font-size:13px}footer a:hover{text-decoration:underline}@media (max-width:640px){main a>div:last-child{display:none}}</style></head><body><h1><a href="${basePath}"><svg width="32" height="32" viewBox="0 0 320 320"><path d="M95 304 c-47 -24 -71 -51 -84 -95 -26 -87 20 -173 107 -199 145 -44 262 135 165 251 -48 56 -128 75 -188 43z m168 -73 c9 -16 17 -32 17 -35 0 -3 -35 -6 -78 -6 -85 0 -78 -4 -110 63 -2 4 32 7 75 7 76 0 79 -1 96 -29z m-149 -46 c38 -65 38 -65 16 -100 -22 -36 -22 -36 -62 32 -40 68 -40 68 -22 101 9 17 20 32 23 32 4 0 24 -29 45 -65z m166 -9 c0 -12 -75 -129 -86 -133 -7 -2 -26 -3 -42 -1 -30 3 -30 3 9 71 39 65 41 67 79 67 22 0 40 -2 40 -4z" /></svg>${config.name}</a></h1><main>{{content}}</main><footer><a target="_blank" href="${config.copyright_link}">${config.copyright}</a></footer></body></html>`;
+    let frag: string[] = [];
+    if (!isRoot) frag.push(`<a href="../"><div><img src="/_/16/type/application/vnd.google-apps.folder"><b>../</b></div></a>`);
     if (files) {
         for (let i = 0; i < files.length; i++) {
             let entry = files[i];
@@ -556,6 +569,16 @@ export default {
                 return response;
             }
 
+            let basePath = config.path.endsWith('/') ? config.path : config.path + '/';
+            if (basePath !== '/') {
+                if (pathname + '/' === basePath) {
+                    return Response.redirect(request.url + '/', 301);
+                }
+                if (!pathname.startsWith(basePath)) {
+                    return new Response('404 Not Found', { status: 404 });
+                }
+            }
+
             let forwardedProto = request.headers.get('x-forwarded-proto');
             if (protocol !== 'https:' && (!forwardedProto || forwardedProto !== 'https')) {
                 return new Response('Please use a HTTPS connection.', { status: 400 });
@@ -579,6 +602,7 @@ export default {
                 if (env.CLIENT_SECRET) config.client_secret = env.CLIENT_SECRET;
                 if (env.REFRESH_TOKEN) config.refresh_token = env.REFRESH_TOKEN;
                 if (env.ROOT_ID) config.cache.meta['/']!.data.id = env.ROOT_ID;
+                if (env.PATH) config.path = env.PATH;
                 if (env.NAME) config.name = env.NAME;
                 if (env.COPYRIGHT) config.copyright = env.COPYRIGHT;
                 if (env.COPYRIGHT_LINK) config.copyright_link = env.COPYRIGHT_LINK;

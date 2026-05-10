@@ -7,6 +7,7 @@ interface AppConfig {
     copyright_link: string;
     users: Record<string, string>;
     env: boolean;
+    path: string;
     working_dir: string;
     cache: {
         meta: Record<string, CacheItem>;

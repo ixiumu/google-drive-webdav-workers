@@ -55,6 +55,7 @@ The Worker supports the following variables:
 | `REFRESH_TOKEN` | **Yes** | Your Google Drive API Refresh Token. | `1//04x...` |
 | `USERS` | **Yes** | A JSON formatted string containing your WebDAV usernames and passwords. | `{"admin": "mypassword"}` |
 | `ROOT_ID` | No | Specific Google Drive Folder ID to mount as root. Defaults to your entire drive. | `1B2a_xYz...` |
+| `PATH` | No | Deployed in subdirectory. | `/dav/` |
 | `NAME` | No | Display name for the web interface. | `My Cloud Drive` |
 | `COPYRIGHT` | No | Copyright text displayed in the footer. | `@ixiumu` |
 | `COPYRIGHT_LINK` | No | URL link for the copyright text. | `https://github.com/...` |
