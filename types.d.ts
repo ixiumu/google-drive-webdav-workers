@@ -20,6 +20,12 @@ interface KVNamespace {
 
 interface Env {
     KV: KVNamespace;
+    USERS: string;
+    REFRESH_TOKEN: string;
+    ROOT_ID: string;
+    NAME: string;
+    COPYRIGHT: string;
+    COPYRIGHT_LINK: string;
 }
 
 interface Ctx {
