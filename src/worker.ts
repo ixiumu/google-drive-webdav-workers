@@ -93,7 +93,12 @@ class KVCache {
             const ttl = customTtl || 300000;
             config.cache[ns]![k] = { data: v, expire: Date.now() + ttl };
             if (this.env && this.env.KV && this.ctx) {
-                this.ctx.waitUntil(this.env.KV.put(ns + '.' + k, JSON.stringify(v), { expirationTtl: Math.max(60, Math.floor(ttl / 1000)) }));
+                const kvPromise = this.env.KV.put(ns + '.' + k, JSON.stringify(v), { expirationTtl: Math.max(60, Math.floor(ttl / 1000)) });
+                if (ns === 'tus_session') {
+                    await kvPromise;
+                } else {
+                    this.ctx.waitUntil(kvPromise);
+                }
             }
         }
     }
@@ -228,47 +233,299 @@ class GDrive {
         return response;
     }
 
+    async POST(request: Request): Promise<Response> {
+        if (request.headers.has('Tus-Resumable')) {
+            let { rpath, fpath } = getUrl(request.url);
+            const totalSize = parseInt(request.headers.get('Upload-Length') || '0', 10);
+            let mimeType = 'application/octet-stream';
+            let targetPath = fpath;
+
+            const metaHeader = request.headers.get('Upload-Metadata');
+            if (metaHeader) {
+                const typeMatch = metaHeader.match(/filetype\s+([A-Za-z0-9+/=]+)/);
+                if (typeMatch) mimeType = atob(typeMatch[1]);
+                const nameMatch = metaHeader.match(/filename\s+([A-Za-z0-9+/=]+)/);
+                if (nameMatch) {
+                    const binString = atob(nameMatch[1]);
+                    const bytes = Uint8Array.from(binString, c => c.charCodeAt(0));
+                    const filename = new TextDecoder().decode(bytes);
+                    targetPath = pathJoin(fpath, filename);
+                }
+            }
+
+            const tok = targetPath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+            let parentMetadata = await this.getMetadata(parent);
+            if (!parentMetadata) return new Response('Parent folder not found', { status: 404 });
+
+            const metadata = await this.getMetadata(targetPath);
+            const existingFileId = metadata?.id || null;
+
+            const api = 'https://www.googleapis.com/upload/drive/v3/files';
+            const initUrl = existingFileId ? `${api}/${existingFileId}?uploadType=resumable` : `${api}?uploadType=resumable`;
+            const initMethod = existingFileId ? 'PATCH' : 'POST';
+            const initBody = existingFileId ? '{}' : JSON.stringify({ name, parents: [parentMetadata.id], mimeType });
+
+            const headers: any = {
+                'Content-Type': 'application/json',
+                'X-Upload-Content-Type': mimeType,
+                Authorization: 'Bearer ' + (await this.getAccessToken())
+            };
+            if (totalSize > 0) headers['X-Upload-Content-Length'] = totalSize.toString();
+
+            const response = await fetch(initUrl, { method: initMethod, headers, body: initBody });
+            const uploadUrl = response.headers.get('Location');
+            if (!uploadUrl) {
+                const errText = await response.text();
+                console.error('GDrive TUS init failed. Status:', response.status, 'Response:', errText);
+                return new Response(`Failed to get GDrive resumable URL`, { status: 500 });
+            }
+
+            const sessionId = crypto.randomUUID();
+            const sessionData = { uploadUrl, totalSize, targetPath, parentId: parentMetadata.id, existingFileId };
+            await this.cache.put(sessionId, sessionData, 'tus_session', 86400000);
+
+            const reqUrl = new URL(request.url);
+            let basePath = config.path.endsWith('/') ? config.path : config.path + '/';
+            const tusLocation = `${reqUrl.origin}${basePath}tus_uploads/${sessionId}`;
+
+            return new Response(null, {
+                status: 201,
+                headers: {
+                    'Tus-Resumable': '1.0.0',
+                    'Location': tusLocation,
+                    'Tus-Extension': 'creation,creation-with-upload',
+                    'Access-Control-Expose-Headers': 'Location, Tus-Resumable, Tus-Extension',
+                }
+            });
+        }
+        return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    async PATCH(request: Request): Promise<Response> {
+        let url = new URL(request.url);
+
+        if (url.pathname.includes('/tus_uploads/')) {
+            const sessionId = url.pathname.split('/').pop()!;
+            const session = await this.cache.get(sessionId, 'tus_session');
+
+            if (!session) return new Response('Session Not Found', { status: 404 });
+
+            const offset = parseInt(request.headers.get('Upload-Offset') || '0', 10);
+            const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
+            const end = offset + contentLength - 1;
+            const rangeTotal = session.totalSize > 0 ? session.totalSize.toString() : '*';
+
+            const res = await fetch(session.uploadUrl, {
+                method: 'PUT',
+                headers: {
+                    'Content-Length': `${contentLength}`,
+                    'Content-Range': `bytes ${offset}-${end}/${rangeTotal}`
+                },
+                body: request.body,
+                // @ts-ignore
+                duplex: 'half'
+            });
+
+            if (res.status === 308) {
+                return new Response(null, {
+                    status: 204,
+                    headers: { 'Tus-Resumable': '1.0.0', 'Upload-Offset': (offset + contentLength).toString() }
+                });
+            } else if (res.status === 200 || res.status === 201) {
+                await this.cache.delete(sessionId, 'tus_session');
+                await this.cache.invalidateFileAndParent(session.targetPath);
+                if (!session.existingFileId) await this.cache.delete(session.parentId, 'objects');
+
+                return new Response(null, {
+                    status: 204,
+                    headers: { 'Tus-Resumable': '1.0.0', 'Upload-Offset': (offset + contentLength).toString() }
+                });
+            }
+            return new Response(`Chunk upload failed: ${await res.text()}`, { status: 500 });
+        }
+        return new Response('Method Not Allowed', { status: 405 });
+    }
+
     async PUT(request: Request): Promise<Response> {
-        let { rpath, fpath } = getUrl(request.url);
+        let { fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') return new Response(null, { status: 405 });
-        const contentLength = request.headers.get('Content-Length');
+        const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
+        const mimeType = request.headers.get('Content-Type') || 'application/octet-stream';
 
-        let putUrl = await this.cache.get(fpath, 'putUrl');
-        let parentMetadata: any;
+        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+        let parentMetadata = await this.getMetadata(parent);
+        if (!parentMetadata) return new Response(null, { status: 404 });
+        const metadata = await this.getMetadata(fpath);
+        const existingFileId = metadata?.id || null;
+        const api = 'https://www.googleapis.com/upload/drive/v3/files';
+        if (contentLength === 0 || !request.body) {
+            const initUrl = existingFileId ? `https://www.googleapis.com/drive/v3/files/${existingFileId}` : `https://www.googleapis.com/drive/v3/files`;
+            const initMethod = existingFileId ? 'PATCH' : 'POST';
+            const body = existingFileId ? '{}' : JSON.stringify({ name, parents: [parentMetadata.id], mimeType });
+            const response = await fetch(initUrl, {
+                method: initMethod,
+                headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                body
+            });
+            if (response.ok) {
+                await this.cache.invalidateFileAndParent(fpath);
+                if (!existingFileId) await this.cache.delete(parentMetadata.id, 'objects');
+                return new Response(null, { status: existingFileId ? 204 : 201 });
+            }
+            return new Response(null, { status: response.status });
+        }
+        if (contentLength <= 5 * 1024 * 1024) {
+            const reader = request.body.getReader();
+            if (existingFileId) {
+                // @ts-ignore
+                const { readable, writable } = new FixedLengthStream(contentLength);
+                const writer = writable.getWriter();
+                const uploadPromise = fetch(`${api}/${existingFileId}?uploadType=media`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': mimeType, Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                    body: readable,
+                    // @ts-ignore
+                    duplex: 'half'
+                });
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        await writer.write(value);
+                    }
+                    await writer.close();
+                } catch (err) { try { await reader.cancel(); } catch (e) { } await writer.abort(err); } finally { reader.releaseLock(); }
+                const res = await uploadPromise;
+                if (res.ok) {
+                    await this.cache.invalidateFileAndParent(fpath);
+                    return new Response(null, { status: 204 });
+                }
+                return new Response(await res.text(), { status: res.status });
+            } else {
+                const boundary = '-------webdav_boundary';
+                const fileMetadata = JSON.stringify({ name: name, parents: [parentMetadata.id], mimeType: mimeType });
+                const encoder = new TextEncoder();
+                const preArray = encoder.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${fileMetadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`);
+                const postArray = encoder.encode(`\r\n--${boundary}--`);
+                const totalLength = preArray.byteLength + contentLength + postArray.byteLength;
+                const { readable, writable } = new FixedLengthStream(totalLength);
+                const writer = writable.getWriter();
+                const uploadPromise = fetch(`${api}?uploadType=multipart`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': `multipart/related; boundary=${boundary}`, Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                    body: readable,
+                    // @ts-ignore
+                    duplex: 'half'
+                });
 
-        if (!putUrl) {
-            const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-            parentMetadata = await this.getMetadata(parent);
-            if (!parentMetadata) return new Response(null, { status: 404 });
+                try {
+                    await writer.write(preArray);
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        await writer.write(value);
+                    }
+                    await writer.write(postArray);
+                    await writer.close();
+                } catch (err) { try { await reader.cancel(); } catch (e) { } await writer.abort(err); } finally { reader.releaseLock(); }
 
-            const metadata = await this.getMetadata(fpath);
-            if (metadata) {
-                await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
+                const res = await uploadPromise;
+                if (res.ok) {
+                    await this.cache.invalidateFileAndParent(fpath);
+                    await this.cache.delete(parentMetadata.id, 'objects');
+                    return new Response(null, { status: 201 });
+                }
+                return new Response(await res.text(), { status: res.status });
+            }
+        }
+
+        const initUrl = existingFileId ? `${api}/${existingFileId}?uploadType=resumable` : `${api}?uploadType=resumable`;
+        const initMethod = existingFileId ? 'PATCH' : 'POST';
+        const initBody = existingFileId ? '{}' : JSON.stringify({ name, parents: [parentMetadata.id], mimeType });
+
+        const initRes = await fetch(initUrl, {
+            method: initMethod,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Upload-Content-Type': mimeType,
+                'X-Upload-Content-Length': contentLength.toString(),
+                Authorization: 'Bearer ' + (await this.getAccessToken())
+            },
+            body: initBody
+        });
+
+        const uploadUrl = initRes.headers.get('Location');
+        if (!uploadUrl) return new Response('Failed to get Resumable Upload URL', { status: 500 });
+
+        const reader = request.body.getReader();
+        const CHUNK_SIZE = 10 * 1024 * 1024;
+        let offset = 0;
+        let residualBuffer: Uint8Array | null = null;
+        let finalStatus = 200;
+
+        try {
+            while (offset < contentLength) {
+                const currentChunkSize = Math.min(CHUNK_SIZE, contentLength - offset);
+                // @ts-ignore
+                const { readable, writable } = new FixedLengthStream(currentChunkSize);
+                const writer = writable.getWriter();
+
+                const uploadPromise = fetch(uploadUrl, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Length': `${currentChunkSize}`,
+                        'Content-Range': `bytes ${offset}-${offset + currentChunkSize - 1}/${contentLength}`
+                    },
+                    body: readable,
+                    // @ts-ignore
+                    duplex: 'half'
+                });
+
+                let bytesSentInChunk = 0;
+                while (bytesSentInChunk < currentChunkSize) {
+                    let data: Uint8Array;
+                    if (residualBuffer) {
+                        data = residualBuffer;
+                        residualBuffer = null;
+                    } else {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        data = value;
+                    }
+
+                    const remaining = currentChunkSize - bytesSentInChunk;
+                    if (data.length <= remaining) {
+                        await writer.write(data);
+                        bytesSentInChunk += data.length;
+                    } else {
+                        await writer.write(data.subarray(0, remaining));
+                        residualBuffer = data.subarray(remaining);
+                        bytesSentInChunk += remaining;
+                    }
+                }
+                await writer.close();
+                const chunkRes = await uploadPromise;
+
+                if (chunkRes.status === 308) {
+                } else if (chunkRes.status === 200 || chunkRes.status === 201) {
+                    finalStatus = chunkRes.status;
+                } else {
+                    throw new Error(`Google Drive chunk failed: ${await chunkRes.text()}`);
+                }
+                offset += currentChunkSize;
             }
 
-            const response = await fetch(new Request('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
-                method: 'POST', headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
-                body: JSON.stringify({ name, parents: [parentMetadata.id] })
-            }));
-            putUrl = response.headers.get('Location');
-            if (!putUrl) return new Response(JSON.stringify(response), { status: 403 });
-            await this.cache.put(fpath, putUrl, 'putUrl');
-        }
-        const headers = new Headers();
-        headers.set('Authorization', 'Bearer ' + (await this.getAccessToken()));
-        if (contentLength) headers.set('Content-Length', contentLength);
-        const response = await fetch(putUrl, { body: request.body, method: 'PUT', headers });
-        if (response.status !== 409) {
-            await this.cache.delete(fpath, 'putUrl');
             await this.cache.invalidateFileAndParent(fpath);
+            if (!existingFileId) await this.cache.delete(parentMetadata.id, 'objects');
+            return new Response(null, { status: finalStatus <= 201 ? 201 : 204 });
 
-            if (!parentMetadata) {
-                const tok = fpath.split('/'); tok.pop();
-                parentMetadata = await this.getMetadata(tok.join('/'));
-            }
-            if (parentMetadata) await this.cache.delete(parentMetadata.id, 'objects');
+        } catch (err: any) {
+            console.error('Upload Failed:', err);
+            try { await reader.cancel(); } catch (e) { }
+            return new Response('Upload Failed', { status: 500 });
+        } finally {
+            if (reader) reader.releaseLock();
         }
-        return new Response(response.status <= 201 ? null : JSON.stringify(response), { status: response.status <= 201 ? 201 : response.status });
     }
 
     async MOVE(request: Request): Promise<Response | undefined> {
@@ -363,12 +620,57 @@ class GDrive {
     }
 
     async HEAD(request: Request): Promise<Response> {
+        let url = new URL(request.url);
+        if (url.pathname.includes('/tus_uploads/')) {
+            const sessionId = url.pathname.split('/').pop()!;
+            const session = await this.cache.get(sessionId, 'tus_session');
+            if (!session) return new Response('Session Not Found', { status: 404 });
+            const rangeTotal = session.totalSize > 0 ? session.totalSize.toString() : '*';
+            const res = await fetch(session.uploadUrl, {
+                method: 'PUT',
+                headers: {
+                    'Content-Length': '0',
+                    'Content-Range': `bytes */${rangeTotal}`
+                }
+            });
+
+            let currentOffset = 0;
+            if (res.status === 308) {
+                const rangeHeader = res.headers.get('Range');
+                if (rangeHeader) {
+                    const parts = rangeHeader.split('-');
+                    currentOffset = parseInt(parts[1], 10) + 1;
+                }
+            } else if (res.status === 200 || res.status === 201) {
+                currentOffset = session.totalSize;
+            }
+
+            return new Response(null, {
+                status: 200,
+                headers: {
+                    'Tus-Resumable': '1.0.0',
+                    'Upload-Offset': currentOffset.toString(),
+                    'Upload-Length': session.totalSize.toString(),
+                    'Cache-Control': 'no-store'
+                }
+            });
+        }
+
         let { fpath } = getUrl(request.url);
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
-            const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true', { headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
-            const result: any = await response.json();
-            if (result) return new Response(null, { status: 200, headers: { 'Content-Length': result.size, 'Content-Type': result.mimeType, 'date': new Date(result.modifiedTime).toUTCString() } });
+            const size = metadata.size ? metadata.size.toString() : '0';
+            const mimeType = metadata.mimeType || 'application/octet-stream';
+            const modifiedTime = metadata.modifiedTime ? new Date(metadata.modifiedTime).toUTCString() : new Date().toUTCString();
+            return new Response(null, {
+                status: 200,
+                headers: {
+                    'Content-Length': size,
+                    'Content-Type': mimeType,
+                    'Last-Modified': modifiedTime,
+                    'Date': modifiedTime
+                }
+            });
         }
         return new Response(null, { status: 404 });
     }
@@ -581,11 +883,6 @@ export default {
                 }
             }
 
-            let forwardedProto = request.headers.get('x-forwarded-proto');
-            if (protocol !== 'https:' && (!forwardedProto || forwardedProto !== 'https')) {
-                return new Response('Please use a HTTPS connection.', { status: 400 });
-            }
-
             // Env
             if (env && !config.env) {
                 if (env.USERS) {
@@ -627,7 +924,9 @@ export default {
             const drive = new GDrive(env, ctx);
 
             // Method Routing
-            if (method === 'PATCH') method = 'COPY';
+            if (method === 'PATCH' && !pathname.includes('/tus_uploads/')) {
+                method = 'COPY';
+            }
 
             if (typeof (drive as any)[method] === 'function') {
                 return await (drive as any)[method](request);
