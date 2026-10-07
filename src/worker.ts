@@ -370,8 +370,19 @@ class GDrive {
     async PUT(request: Request): Promise<Response> {
         let { fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') return new Response(null, { status: 405 });
-        const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
         const mimeType = request.headers.get('Content-Type') || 'application/octet-stream';
+
+        let contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
+        let body: ReadableStream<Uint8Array> | null = request.body;
+
+        // A chunked upload carries no Content-Length header, so the size is
+        // unknown and the request would otherwise be treated as a zero byte
+        // write. Buffer the body to recover the length.
+        if (body && !request.headers.has('Content-Length')) {
+            const buffered = await request.arrayBuffer();
+            contentLength = buffered.byteLength;
+            body = contentLength > 0 ? new Response(buffered).body : null;
+        }
 
         const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
         let parentMetadata = await this.getMetadata(parent);
@@ -379,24 +390,35 @@ class GDrive {
         const metadata = await this.getMetadata(fpath);
         const existingFileId = metadata?.id || null;
         const api = 'https://www.googleapis.com/upload/drive/v3/files';
-        if (contentLength === 0 || !request.body) {
-            const initUrl = existingFileId ? `https://www.googleapis.com/drive/v3/files/${existingFileId}` : `https://www.googleapis.com/drive/v3/files`;
-            const initMethod = existingFileId ? 'PATCH' : 'POST';
-            const body = existingFileId ? '{}' : JSON.stringify({ name, parents: [parentMetadata.id], mimeType });
-            const response = await fetch(initUrl, {
-                method: initMethod,
+        if (contentLength === 0 || !body) {
+            if (existingFileId) {
+                // A JSON PATCH with "{}" only touches metadata and would leave the
+                // previous bytes behind, so truncate through the media endpoint.
+                const response = await fetch(`${api}/${existingFileId}?uploadType=media`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': mimeType, Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                    body: new Uint8Array(0)
+                });
+                if (response.ok) {
+                    await this.cache.invalidateFileAndParent(fpath);
+                    return new Response(null, { status: 204 });
+                }
+                return new Response(null, { status: response.status });
+            }
+            const response = await fetch('https://www.googleapis.com/drive/v3/files', {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
-                body
+                body: JSON.stringify({ name, parents: [parentMetadata.id], mimeType })
             });
             if (response.ok) {
                 await this.cache.invalidateFileAndParent(fpath);
-                if (!existingFileId) await this.cache.delete(parentMetadata.id, 'objects');
-                return new Response(null, { status: existingFileId ? 204 : 201 });
+                await this.cache.delete(parentMetadata.id, 'objects');
+                return new Response(null, { status: 201 });
             }
             return new Response(null, { status: response.status });
         }
         if (contentLength <= 5 * 1024 * 1024) {
-            const reader = request.body.getReader();
+            const reader = body.getReader();
             if (existingFileId) {
                 // @ts-ignore
                 const { readable, writable } = new FixedLengthStream(contentLength);
@@ -478,7 +500,7 @@ class GDrive {
         const uploadUrl = initRes.headers.get('Location');
         if (!uploadUrl) return new Response('Failed to get Resumable Upload URL', { status: 500 });
 
-        const reader = request.body.getReader();
+        const reader = body.getReader();
         const CHUNK_SIZE = 10 * 1024 * 1024;
         let offset = 0;
         let residualBuffer: Uint8Array | null = null;
