@@ -44,6 +44,14 @@ const escapeXml = (value: unknown): string =>
 // containing spaces, "&", "#" or non-ASCII characters.
 const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
 
+// Collections are addressed with a trailing slash. Strip it so the final
+// segment is the resource name and not an empty string.
+const splitPath = (path: string): { name: string; parent: string } => {
+    const parts = (path.endsWith('/') ? path.slice(0, -1) : path).split('/');
+    const name = parts.pop()!;
+    return { name, parent: parts.join('/') };
+};
+
 const getUrl = (url: string): { rpath: string; fpath: string } => {
     const rpath = decodeURIComponent(new URL(url, 'http://localhost').pathname);
     let fpath_relative = rpath;
@@ -194,17 +202,16 @@ class GDrive {
 
     async MKCOL(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
-        if (fpath.slice(-1) === '/') fpath = fpath.slice(0, -1);
 
         let metadata = await this.getMetadata(fpath);
-        if (metadata) return new Response('<d:error xmlns:d="DAV:" xmlns:td="https://www.contoso.com/schema/"><td:exception>MethodNotAllowed</td:exception><td:message>The resource you tried to create already exists</td:message></d:error>', { status: 405 });
+        if (metadata) return new Response('<D:error xmlns:D="DAV:"><D:exception>MethodNotAllowed</D:exception><D:message>The resource you tried to create already exists</D:message></D:error>', { status: 405 });
 
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+        const { name, parent } = splitPath(fpath);
         let parentMetadata = await this.getMetadata(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
 
         let response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
-            body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parentMetadata.id] }),
+            body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentMetadata.id] }),
             method: 'POST',
             headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) }
         }));
@@ -224,12 +231,20 @@ class GDrive {
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             try {
-                if (metadata.mimeType === 'application/vnd.google-apps.folder') {
+                if (metadata.mimeType === FOLDER_MIME) {
+                    // The listing below is built from relative links, so a
+                    // collection URL without a trailing slash would resolve every
+                    // child link against the wrong parent directory.
+                    if (!url.pathname.endsWith('/')) {
+                        const redirectUrl = new URL(request.url);
+                        redirectUrl.pathname += '/';
+                        return Response.redirect(redirectUrl.toString(), 301);
+                    }
                     const objects = await this.getObjects(metadata.id);
                     let files: Partial<DriveFile>[] = [];
                     for (let i = 0; i < objects.length; i++) {
                         let object = objects[i];
-                        files.push({ name: trimString(object.name, '/'), dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toISOString().split('T')[0], size: object.size ? object.size : 0, iconLink: object.iconLink });
+                        files.push({ name: trimString(object.name, '/'), dir: object.mimeType === FOLDER_MIME, lastmodified: new Date(object.modifiedTime).toISOString().split('T')[0], size: object.size ? object.size : 0, iconLink: object.iconLink });
                     }
                     return new Response(arrayToHtml(rpath, files), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
                 }
@@ -274,7 +289,7 @@ class GDrive {
                 }
             }
 
-            const tok = targetPath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+            const { name, parent } = splitPath(targetPath);
             let parentMetadata = await this.getMetadata(parent);
             if (!parentMetadata) return new Response('Parent folder not found', { status: 404 });
 
@@ -384,7 +399,7 @@ class GDrive {
             body = contentLength > 0 ? new Response(buffered).body : null;
         }
 
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
+        const { name, parent } = splitPath(fpath);
         let parentMetadata = await this.getMetadata(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
         const metadata = await this.getMetadata(fpath);
@@ -577,11 +592,12 @@ class GDrive {
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
         const { fpath: dest_fpath } = getUrl(destination);
+        if (dest_fpath === '/') return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop()!; const dest_parent = dest_tok.join('/');
+        const { name, parent } = splitPath(fpath);
+        const { name: dest_name, parent: dest_parent } = splitPath(dest_fpath);
 
         let patchUrl: string | undefined;
         let originalParentId = metadata.parents && metadata.parents.length > 0 ? metadata.parents[0] : null;
@@ -614,14 +630,15 @@ class GDrive {
 
     async COPY(request: Request): Promise<Response> {
         let { fpath } = getUrl(request.url);
+        if (fpath === '/') return new Response(null, { status: 403 });
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
         const { fpath: dest_fpath } = getUrl(destination);
         if (dest_fpath === '/') return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop()!; const dest_parent = dest_tok.join('/');
+        const { name, parent } = splitPath(fpath);
+        const { name: dest_name, parent: dest_parent } = splitPath(dest_fpath);
 
         let parents = metadata.parents;
         let destParentId = null;
