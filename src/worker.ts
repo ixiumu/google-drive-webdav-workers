@@ -65,6 +65,23 @@ const getUrl = (url: string): { rpath: string; fpath: string } => {
     };
 };
 
+// Constant-time string comparison. `crypto.subtle.timingSafeEqual` throws when
+// the buffers differ in length, and returning early would leak the length of
+// the stored secret through timing, so compare a value against itself instead.
+function timingSafeEqual(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const left = encoder.encode(a);
+    const right = encoder.encode(b);
+    return left.byteLength === right.byteLength
+        ? crypto.subtle.timingSafeEqual(left, right)
+        : !crypto.subtle.timingSafeEqual(left, left);
+}
+
+function isValidUser(users: Record<string, string>, creds: { user: string; pass: string }): boolean {
+    if (!Object.prototype.hasOwnProperty.call(users, creds.user)) return false;
+    return timingSafeEqual(String(users[creds.user]), creds.pass);
+}
+
 function basicAuthentication(request: Request): { user: string; pass: string } | null {
     const Authorization = request.headers.get('Authorization');
     if (!Authorization) return null;
@@ -149,6 +166,10 @@ class StatusError extends Error {
         this.status = status;
     }
 }
+
+// The OAuth access token is deliberately kept out of `config.cache`, which is
+// persisted to KV: a bearer token does not belong on durable shared storage.
+let tokenCache: { access_token: string; expires: number } | null = null;
 
 class GDrive {
     cache: KVCache;
@@ -248,11 +269,14 @@ class GDrive {
                     }
                     return new Response(arrayToHtml(rpath, files), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
                 }
-                if (metadata.mimeType.startsWith('image/')) {
+                if (metadata.mimeType.startsWith('image/') && metadata.thumbnailLink) {
                     const tempLink = metadata.thumbnailLink.replace(/=s\d+$/, '');
                     const rawParam = url.searchParams.get('param');
-                    const paramSuffix = rawParam ? `=${rawParam}` : '=s0';
-                    return await fetch(new Request(tempLink + paramSuffix, request));
+                    // Plain fetch: the client's Authorization header must never be
+                    // forwarded to Google's CDN. If the short-lived link has
+                    // expired, fall through to the download endpoint below.
+                    const thumb = await fetch(tempLink + (rawParam ? `=${rawParam}` : '=s0'));
+                    if (thumb.ok) return thumb;
                 }
                 const abuse = url.searchParams.get('abuse') === 'true';
                 const range = request.headers.get('Range');
@@ -832,8 +856,7 @@ class GDrive {
     }
 
     async getAccessToken(): Promise<string> {
-        let token = await this.cache.get('token', 'config');
-        if (token && token.expires && token.expires > Date.now()) return token.access_token;
+        if (tokenCache && tokenCache.expires > Date.now()) return tokenCache.access_token;
         if (GDrive.fetchingTokenPromise) {
             return await GDrive.fetchingTokenPromise;
         }
@@ -853,12 +876,7 @@ class GDrive {
                 if (result.error) {
                     throw new StatusError(result.error_description, response.status);
                 }
-                await this.cache.put(
-                    'token',
-                    { expires: Date.now() + 3500 * 1000, access_token: result.access_token },
-                    'config',
-                    3500 * 1000
-                );
+                tokenCache = { expires: Date.now() + 3500 * 1000, access_token: result.access_token };
                 return result.access_token;
             } finally {
                 GDrive.fetchingTokenPromise = null;
@@ -942,8 +960,12 @@ export default {
         try {
             // Static
             if (pathname.startsWith('/_/')) {
-                let url = new URL(request.url); url.hostname = 'drive-thirdparty.googleusercontent.com'; url.pathname = url.pathname.slice(2);
-                let response = await fetch(new Request(url.toString(), request));
+                const url = new URL(request.url);
+                url.hostname = 'drive-thirdparty.googleusercontent.com';
+                url.pathname = url.pathname.slice(2);
+                // Plain fetch: do not forward the client's credentials to a
+                // third-party host.
+                let response = await fetch(url.toString());
                 response = new Response(response.body, response);
                 response.headers.set('Access-Control-Allow-Origin', '*');
                 response.headers.set('Cache-Control', 'public, max-age=16768000');
@@ -994,7 +1016,7 @@ export default {
             }
 
             const auth = basicAuthentication(request);
-            if (!auth || !config.users[auth.user] || config.users[auth.user] !== auth.pass) {
+            if (!auth || !isValidUser(config.users, auth)) {
                 return new Response('Unauthorized', { status: 401 });
             }
 
