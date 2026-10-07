@@ -81,6 +81,13 @@ function timingSafeEqual(a: string, b: string): boolean {
         : !crypto.subtle.timingSafeEqual(left, left);
 }
 
+// Carry an upstream failure's HTTP status through to the client instead of
+// collapsing every error into a 500.
+function errorStatus(e: unknown): number {
+    const status = (e as any)?.status;
+    return typeof status === 'number' && status >= 400 && status <= 599 ? status : 500;
+}
+
 function isValidUser(users: Record<string, string>, creds: { user: string; pass: string }): boolean {
     if (!Object.prototype.hasOwnProperty.call(users, creds.user)) return false;
     return timingSafeEqual(String(users[creds.user]), creds.pass);
@@ -248,7 +255,7 @@ class GDrive {
             await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
             return new Response(null, { status: 201 });
         }
-        return new Response(null, { status: 422 });
+        return new Response(await response.text(), { status: response.status });
     }
 
     async GET(request: Request): Promise<Response> {
@@ -288,13 +295,17 @@ class GDrive {
                 const range = request.headers.get('Range');
                 response = await this.getRawContent(metadata.id, range, abuse);
                 if (response.status >= 400) {
-                    const result: any = await response.json();
-                    if (!abuse && response.status === 403 && result.error.errors[0].reason === 'cannotDownloadAbusiveFile') {
+                    // The body is not always JSON, and `errors` is not always
+                    // populated; either would otherwise turn into a 500 that
+                    // hides Drive's real status.
+                    const result: any = await response.json().catch(() => ({}));
+                    const reason = result?.error?.errors?.[0]?.reason;
+                    if (!abuse && response.status === 403 && reason === 'cannotDownloadAbusiveFile') {
                         return Response.redirect(url.origin + url.pathname + '?abuse=true', 302);
                     }
-                    throw new StatusError(result.error.message, response.status);
+                    throw new StatusError(result?.error?.message || response.statusText || 'Drive error', response.status);
                 }
-            } catch (e: any) { return new Response(e.message, { status: 500 }); }
+            } catch (e: any) { return new Response(e.message, { status: errorStatus(e) }); }
         } else { response = new Response(null, { status: 404 }); }
         return response;
     }
@@ -343,7 +354,7 @@ class GDrive {
             if (!uploadUrl) {
                 const errText = await response.text();
                 console.error('GDrive TUS init failed. Status:', response.status, 'Response:', errText);
-                return new Response(`Failed to get GDrive resumable URL`, { status: 500 });
+                return new Response(`Failed to get GDrive resumable URL`, { status: response.status });
             }
 
             const sessionId = crypto.randomUUID();
@@ -595,7 +606,7 @@ class GDrive {
                 } else if (chunkRes.status === 200 || chunkRes.status === 201) {
                     finalStatus = chunkRes.status;
                 } else {
-                    throw new Error(`Google Drive chunk failed: ${await chunkRes.text()}`);
+                    throw new StatusError(`Google Drive chunk failed: ${await chunkRes.text()}`, chunkRes.status);
                 }
                 offset += currentChunkSize;
             }
@@ -606,7 +617,7 @@ class GDrive {
         } catch (err: any) {
             console.error('Upload Failed:', err);
             try { await reader.cancel(); } catch (e) { }
-            return new Response('Upload Failed', { status: 500 });
+            return new Response(err?.message || 'Upload Failed', { status: errorStatus(err) });
         } finally {
             if (reader) reader.releaseLock();
         }
@@ -642,16 +653,20 @@ class GDrive {
             body: name !== dest_name ? JSON.stringify({ name: dest_name }) : null
         });
 
-        const result: any = await response.json();
-        if (result.id) {
-            // The destination path now resolves to a different file, and both
-            // the old and the new parent lost a child.
-            await this.cache.invalidateFileAndParent(fpath, originalParentId);
-            await this.cache.delete(dest_fpath, 'meta');
-            if (destParentId && destParentId !== originalParentId) await this.cache.delete(destParentId, 'objects');
+        const bodyText = await response.text();
+        if (!response.ok) return new Response(bodyText, { status: response.status });
 
-            return new Response(null, { status: 201, headers: { 'Location': destination } });
-        }
+        let result: any = {};
+        try { result = JSON.parse(bodyText); } catch { /* not JSON */ }
+        if (!result.id) return new Response(bodyText, { status: 500 });
+
+        // The destination path now resolves to a different file, and both
+        // the old and the new parent lost a child.
+        await this.cache.invalidateFileAndParent(fpath, originalParentId);
+        await this.cache.delete(dest_fpath, 'meta');
+        if (destParentId && destParentId !== originalParentId) await this.cache.delete(destParentId, 'objects');
+
+        return new Response(null, { status: 201, headers: { 'Location': destination } });
     }
 
     async COPY(request: Request): Promise<Response> {
@@ -678,10 +693,11 @@ class GDrive {
             destParentId = metadata.parents && metadata.parents.length > 0 ? metadata.parents[0] : null;
         }
 
-        await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '/copy?supportsAllDrives=true', {
+        const copyResponse = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '/copy?supportsAllDrives=true', {
             method: 'POST', headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
             body: JSON.stringify({ name: dest_name, parents: parents })
         });
+        if (!copyResponse.ok) return new Response(await copyResponse.text(), { status: copyResponse.status });
 
         await this.cache.delete(dest_fpath, 'meta');
         if (destParentId) await this.cache.delete(destParentId, 'objects');
@@ -983,7 +999,9 @@ export default {
             let basePath = config.path.endsWith('/') ? config.path : config.path + '/';
             if (basePath !== '/') {
                 if (pathname + '/' === basePath) {
-                    return Response.redirect(request.url + '/', 301);
+                    const u = new URL(request.url);
+                    u.pathname += '/';
+                    return Response.redirect(u.toString(), 301);
                 }
                 if (!pathname.startsWith(basePath)) {
                     return new Response('404 Not Found', { status: 404 });
