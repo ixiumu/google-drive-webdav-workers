@@ -242,7 +242,7 @@ class GDrive {
         if (metadata) return new Response('<D:error xmlns:D="DAV:"><D:exception>MethodNotAllowed</D:exception><D:message>The resource you tried to create already exists</D:message></D:error>', { status: 405 });
 
         const { name, parent } = splitPath(fpath);
-        let parentMetadata = await this.getMetadata(parent);
+        const parentMetadata = await this.ensureDir(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
 
         let response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
@@ -331,7 +331,7 @@ class GDrive {
             }
 
             const { name, parent } = splitPath(targetPath);
-            let parentMetadata = await this.getMetadata(parent);
+            const parentMetadata = await this.ensureDir(parent);
             if (!parentMetadata) return new Response('Parent folder not found', { status: 404 });
 
             const metadata = await this.getMetadata(targetPath);
@@ -440,7 +440,7 @@ class GDrive {
         }
 
         const { name, parent } = splitPath(fpath);
-        let parentMetadata = await this.getMetadata(parent);
+        const parentMetadata = await this.ensureDir(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
         const metadata = await this.getMetadata(fpath);
         const existingFileId = metadata?.id || null;
@@ -778,6 +778,34 @@ class GDrive {
     async UNLOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
     async PROPPATCH(): Promise<Response> { return new Response(null, { status: 200 }); }
 
+    // Create any missing folder along the way to `path`, so a client can PUT
+    // `/a/b/c.txt` without having to MKCOL `/a` and `/a/b` first.
+    async ensureDir(path: string): Promise<any | null> {
+        let current = await this.getMetadata('/');
+        if (!current) return null;
+        const dir = path.endsWith('/') ? path : path + '/';
+        if (dir === '/') return current;
+
+        const names = dir.split('/').filter(Boolean);
+        for (let i = 0; i < names.length; i++) {
+            const sub = '/' + names.slice(0, i + 1).join('/') + '/';
+            let meta = await this.getMetadata(sub);
+            if (!meta) {
+                const created = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                    body: JSON.stringify({ name: names[i], mimeType: FOLDER_MIME, parents: [current.id] })
+                });
+                if (!created.ok) return null;
+                await this.cache.invalidateFileAndParent(sub, current.id);
+                meta = await this.getMetadata(sub);
+                if (!meta) return null;
+            }
+            current = meta;
+        }
+        return current;
+    }
+
     async getMetadata(path: string): Promise<any> {
         path = path.startsWith('/') ? path : '/' + path;
         path = path.endsWith('/') ? path : path + '/';
@@ -1014,9 +1042,12 @@ export default {
                     if (typeof env.USERS === 'string') {
                         try {
                             const users = JSON.parse(env.USERS);
-                            if (users) config.users = users;
+                            // Silently keeping the placeholder credentials below
+                            // would leave the server reachable as user/password.
+                            config.users = users && typeof users === 'object' ? users : {};
                         } catch (error) {
-                            console.log(error);
+                            console.error('USERS is not valid JSON');
+                            config.users = {};
                         }
                     } else if (typeof env.USERS === 'object') {
                         config.users = env.USERS as Record<string, string>;
@@ -1034,6 +1065,9 @@ export default {
             }
 
             // Global Basic Authentication
+            if (Object.keys(config.users).length === 0) {
+                return new Response('Server not configured: set the USERS variable', { status: 500 });
+            }
             if (!request.headers.has('Authorization')) {
                 return new Response('Authentication Required.', {
                     status: 401,
@@ -1044,6 +1078,17 @@ export default {
             const auth = basicAuthentication(request);
             if (!auth || !isValidUser(config.users, auth)) {
                 return new Response('Unauthorized', { status: 401 });
+            }
+
+            const missing = [
+                ['CLIENT_ID', config.client_id],
+                ['CLIENT_SECRET', config.client_secret],
+                ['REFRESH_TOKEN', config.refresh_token]
+            ]
+                .filter(([, value]) => !value)
+                .map(([key]) => key);
+            if (missing.length > 0) {
+                return new Response('Server not configured: missing ' + missing.join(', '), { status: 500 });
             }
 
             const drive = new GDrive(env, ctx);
