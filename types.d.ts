@@ -33,6 +33,8 @@ interface DriveFile {
     dir?: boolean;
     lastmodified?: string | null;
     quota?: { used: number | string; available: number | string } | null;
+    type?: string;
+    etag?: string;
 }
 
 interface DriveFile {
@@ -49,4 +51,6 @@ interface DriveFile {
     dir?: boolean;
     lastmodified?: string | null;
     quota?: { used: number | string; available: number | string } | null;
+    type?: string;
+    etag?: string;
 }

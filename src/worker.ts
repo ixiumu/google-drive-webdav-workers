@@ -35,6 +35,15 @@ const formatSize = (n: number | string): string => {
     return parseFloat((num / 1024 / 1024).toFixed(1)) + 'M';
 };
 
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+const escapeXml = (value: unknown): string =>
+    String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// Percent-encode each path segment individually so hrefs stay valid for names
+// containing spaces, "&", "#" or non-ASCII characters.
+const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
+
 const getUrl = (url: string): { rpath: string; fpath: string } => {
     const rpath = decodeURIComponent(new URL(url, 'http://localhost').pathname);
     let fpath_relative = rpath;
@@ -151,24 +160,36 @@ class GDrive {
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
-        let content: string;
-        if (metadata.mimeType === 'application/vnd.google-apps.folder') {
-            const depth = request.headers.get('Depth');
-            if (depth && depth === '1') {
-                const objects = await this.getObjects(metadata.id);
-                let files: Partial<DriveFile>[] = [];
-                for (let i = 0; i < objects.length; i++) {
-                    let object = objects[i];
-                    files.push({ name: object.name, dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toUTCString(), size: object.size ? object.size : 0 });
-                }
-                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: null, size: 0 }, ...(files || [])], '');
-            } else {
-                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: fpath === '/' ? await this.getQuota() : null }]);
-            }
-        } else {
-            content = arrayToXml(rpath, [{ name: '', dir: false, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size }]);
+        // A missing Depth header means "infinity" (RFC 4918). Serving the
+        // immediate children instead keeps a single request useful for clients
+        // that never send the header.
+        const depth = request.headers.get('Depth');
+        const isFolder = metadata.mimeType === FOLDER_MIME;
+
+        const self: Partial<DriveFile> = {
+            name: '',
+            dir: isFolder,
+            lastmodified: metadata.modifiedTime ? new Date(metadata.modifiedTime).toUTCString() : new Date().toUTCString(),
+            size: metadata.size,
+            type: metadata.mimeType,
+            etag: (metadata.id || 'root') + '-' + (metadata.modifiedTime || ''),
+            quota: isFolder && depth === '0' && fpath === '/' ? await this.getQuota() : null
+        };
+
+        let entries: Partial<DriveFile>[] = [self];
+        if (isFolder && depth !== '0') {
+            const objects = await this.getObjects(metadata.id);
+            entries = entries.concat(objects.map(object => ({
+                name: object.name,
+                dir: object.mimeType === FOLDER_MIME,
+                lastmodified: new Date(object.modifiedTime).toUTCString(),
+                size: object.size ? object.size : 0,
+                type: object.mimeType,
+                etag: object.id + '-' + (object.modifiedTime || '')
+            })));
         }
-        return new Response(content, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
+
+        return new Response(arrayToXml(rpath, entries), { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
 
     async MKCOL(request: Request): Promise<Response> {
@@ -808,27 +829,44 @@ class GDrive {
     }
 }
 
-function arrayToXml(rpath: string, files: Partial<DriveFile>[], cursor?: string): string {
-    let entries: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-        let file = files[i];
-        if (!file.lastmodified) file.lastmodified = new Date().toUTCString();
-        let sizeTag = !file.dir ? `<d:getcontentlength>${file.size}</d:getcontentlength>` : '<d:getcontentlength />';
-        let quotaTag = file.quota ? `<d:quota-used-bytes>${file.quota.used}</d:quota-used-bytes><d:quota-available-bytes>${file.quota.available}</d:quota-available-bytes>` : '';
+function arrayToXml(rpath: string, files: Partial<DriveFile>[]): string {
+    const lock =
+        '<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope>' +
+        '<D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>';
 
+    const entries = files.map(file => {
+        // The self entry (no name) echoes the requested path.
         let href = file.name ? pathJoin(rpath, file.name) : rpath;
         if (file.dir && !href.endsWith('/')) href += '/';
+        const displayname = file.name || rpath.split('/').filter(Boolean).pop() || '';
+        const etag = String(file.etag || '0').replace(/[<>&"]/g, '');
+        const quota = file.quota
+            ? `<D:quota-used-bytes>${file.quota.used}</D:quota-used-bytes><D:quota-available-bytes>${file.quota.available}</D:quota-available-bytes>`
+            : '';
 
-        entries.push(
-            '<d:response>', `<d:href>${encodeURI(href)}</d:href>`, '<d:propstat>', '<d:prop>',
-            `<d:getlastmodified>${file.lastmodified}</d:getlastmodified>`,
-            file.dir ? '<d:resourcetype><d:collection/></d:resourcetype>' : '<d:resourcetype />',
-            sizeTag, quotaTag,
-            '</d:prop>', '<d:status>HTTP/1.1 200 OK</d:status>', '</d:propstat>', '</d:response>'
+        return (
+            '<D:response>' +
+            `<D:href>${escapeXml(encodePath(href))}</D:href>` +
+            '<D:propstat><D:prop>' +
+            (file.dir
+                ? '<D:resourcetype><D:collection/></D:resourcetype>'
+                : '<D:resourcetype></D:resourcetype>') +
+            `<D:displayname>${escapeXml(displayname)}</D:displayname>` +
+            // Folders deliberately omit getcontentlength: an empty size on a
+            // collection upsets several clients.
+            (file.dir
+                ? ''
+                : `<D:getcontentlength>${file.size || 0}</D:getcontentlength>` +
+                  `<D:getcontenttype>${escapeXml(file.type || 'application/octet-stream')}</D:getcontenttype>`) +
+            `<D:getetag>"${etag}"</D:getetag>` +
+            `<D:getlastmodified>${file.lastmodified || new Date().toUTCString()}</D:getlastmodified>` +
+            lock + quota +
+            '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>' +
+            '</D:response>'
         );
-    }
-    let new_cursor = cursor ? `<td:cursor>${cursor}</td:cursor>` : '';
-    return `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:" xmlns:R="https://www.contoso.com/schema/">${entries.join('\n')}${new_cursor}</d:multistatus>`;
+    });
+
+    return `<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:">${entries.join('')}</D:multistatus>`;
 }
 
 function arrayToHtml(rpath: string, files: Partial<DriveFile>[]): string {
