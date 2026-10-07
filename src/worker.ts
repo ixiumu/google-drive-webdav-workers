@@ -941,8 +941,12 @@ function arrayToXml(rpath: string, files: Partial<DriveFile>[]): string {
         if (file.dir && !href.endsWith('/')) href += '/';
         const displayname = file.name || rpath.split('/').filter(Boolean).pop() || '';
         const etag = String(file.etag || '0').replace(/[<>&"]/g, '');
+        // Numeric fields are serialised as numbers, never as whatever Drive
+        // happened to hand back; an unbounded quota is reported as NaN.
+        const size = Number(file.size) || 0;
         const quota = file.quota
-            ? `<D:quota-used-bytes>${file.quota.used}</D:quota-used-bytes><D:quota-available-bytes>${file.quota.available}</D:quota-available-bytes>`
+            ? `<D:quota-used-bytes>${Number(file.quota.used) || 0}</D:quota-used-bytes>` +
+              `<D:quota-available-bytes>${Number(file.quota.available) || 0}</D:quota-available-bytes>`
             : '';
 
         return (
@@ -957,7 +961,7 @@ function arrayToXml(rpath: string, files: Partial<DriveFile>[]): string {
             // collection upsets several clients.
             (file.dir
                 ? ''
-                : `<D:getcontentlength>${file.size || 0}</D:getcontentlength>` +
+                : `<D:getcontentlength>${size}</D:getcontentlength>` +
                   `<D:getcontenttype>${escapeXml(file.type || 'application/octet-stream')}</D:getcontenttype>`) +
             `<D:getetag>"${etag}"</D:getetag>` +
             `<D:getlastmodified>${file.lastmodified || new Date().toUTCString()}</D:getlastmodified>` +
