@@ -52,6 +52,10 @@ const splitPath = (path: string): { name: string; parent: string } => {
     return { name, parent: parts.join('/') };
 };
 
+// Drive query values are single-quoted; a literal backslash or quote inside
+// the value has to be escaped with a backslash.
+const escapeQuery = (value: string): string => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
 const getUrl = (url: string): { rpath: string; fpath: string } => {
     const rpath = decodeURIComponent(new URL(url, 'http://localhost').pathname);
     let fpath_relative = rpath;
@@ -780,11 +784,12 @@ class GDrive {
             fullpath += name + '/';
             meta = await this.cache.get(fullpath, 'meta');
             if (!meta) {
-                name = decodeURIComponent(name).replace(/\'/g, "\\'");
+                // `getUrl` already decoded the path once; decoding again here
+                // threw a URIError for any name containing a literal "%".
                 const result = await this.queryDrive({
                     includeItemsFromAllDrives: true,
                     supportsAllDrives: true,
-                    q: `'${metadata.id}' in parents and name = '${name}' and trashed = false`,
+                    q: `'${metadata.id}' in parents and name = '${escapeQuery(name)}' and trashed = false`,
                     fields: `files(id, name, mimeType, size, modifiedTime, description, iconLink, thumbnailLink, imageMediaMetadata, parents)`,
                 });
                 if (result.files && result.files.length > 0) {
@@ -935,17 +940,25 @@ function arrayToHtml(rpath: string, files: Partial<DriveFile>[]): string {
     if (!isRoot) frag.push(`<a href="../"><div><img src="/_/16/type/application/vnd.google-apps.folder"><b>../</b></div></a>`);
     if (files) {
         for (let i = 0; i < files.length; i++) {
-            let entry = files[i];
-            let iconLink = entry.iconLink ? entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/') : '';
-            let modTime = entry.lastmodified ? `<div>${new Date(entry.lastmodified).toISOString().split('T')[0]}</div>` : '';
+            const entry = files[i];
+            const rawName = entry.name || '';
+            const iconLink = entry.iconLink ? entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/') : '';
+            const modTime = entry.lastmodified ? `<div>${escapeXml(new Date(entry.lastmodified).toISOString().split('T')[0])}</div>` : '';
+            // Names come from Drive and are fully attacker controlled: escape them
+            // for HTML text and percent-encode them for the href.
+            const name = escapeXml(rawName);
+            const href = encodeURIComponent(rawName);
             if (entry.dir) {
-                frag.push(`<a href="${entry.name}/"><div><img src="${iconLink}"/><b>${entry.name}</b></div>${modTime}</a>`);
+                frag.push(`<a href="${href}/"><div><img src="${escapeXml(iconLink)}"/><b>${name}</b></div>${modTime}</a>`);
             } else {
-                frag.push(`<a href="${entry.name}" target="_blank"><div><img src="${iconLink}"/>${entry.name}</div><div>${formatSize(entry.size || 0)}</div>${modTime}</a>`);
+                frag.push(`<a href="${href}" target="_blank"><div><img src="${escapeXml(iconLink)}"/>${name}</div><div>${formatSize(entry.size || 0)}</div>${modTime}</a>`);
             }
         }
     }
-    return tpl.trim().replace(/{{content}}/, frag.join('')).replace(/{{title}}/, title);
+    const content = frag.join('');
+    // Replacer functions: substitution patterns such as `$&` in a file name
+    // would otherwise be expanded by `String.prototype.replace`.
+    return tpl.trim().replace(/{{content}}/, () => content).replace(/{{title}}/, () => escapeXml(title));
 }
 
 export default {
