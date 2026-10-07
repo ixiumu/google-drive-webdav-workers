@@ -152,12 +152,15 @@ class KVCache {
         }
     }
 
-    async invalidateFileAndParent(fpath: string): Promise<void> {
+    // Drops the path -> id mapping for the written entry, the parent's own
+    // mapping, and the parent's child listing. The last one is what PROPFIND
+    // and GET read, so skipping it on an overwrite left stale entries in the
+    // directory listing for up to five minutes.
+    async invalidateFileAndParent(fpath: string, parentId?: string | null): Promise<void> {
+        const { parent } = splitPath(fpath);
         await this.delete(fpath, 'meta');
-        const tok = fpath.split('/');
-        tok.pop();
-        const parent = tok.join('/');
-        await this.delete(parent, 'meta');
+        if (parent !== fpath) await this.delete(parent, 'meta');
+        if (parentId) await this.delete(parentId, 'objects');
     }
 }
 
@@ -242,8 +245,7 @@ class GDrive {
         }));
 
         if (response.ok) {
-            await this.cache.invalidateFileAndParent(fpath);
-            await this.cache.delete(parentMetadata.id, 'objects');
+            await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
             return new Response(null, { status: 201 });
         }
         return new Response(null, { status: 422 });
@@ -397,8 +399,7 @@ class GDrive {
                 });
             } else if (res.status === 200 || res.status === 201) {
                 await this.cache.delete(sessionId, 'tus_session');
-                await this.cache.invalidateFileAndParent(session.targetPath);
-                if (!session.existingFileId) await this.cache.delete(session.parentId, 'objects');
+                await this.cache.invalidateFileAndParent(session.targetPath, session.parentId);
 
                 return new Response(null, {
                     status: 204,
@@ -443,7 +444,7 @@ class GDrive {
                     body: new Uint8Array(0)
                 });
                 if (response.ok) {
-                    await this.cache.invalidateFileAndParent(fpath);
+                    await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
                     return new Response(null, { status: 204 });
                 }
                 return new Response(null, { status: response.status });
@@ -454,8 +455,7 @@ class GDrive {
                 body: JSON.stringify({ name, parents: [parentMetadata.id], mimeType })
             });
             if (response.ok) {
-                await this.cache.invalidateFileAndParent(fpath);
-                await this.cache.delete(parentMetadata.id, 'objects');
+                await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
                 return new Response(null, { status: 201 });
             }
             return new Response(null, { status: response.status });
@@ -483,7 +483,7 @@ class GDrive {
                 } catch (err) { try { await reader.cancel(); } catch (e) { } await writer.abort(err); } finally { reader.releaseLock(); }
                 const res = await uploadPromise;
                 if (res.ok) {
-                    await this.cache.invalidateFileAndParent(fpath);
+                    await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
                     return new Response(null, { status: 204 });
                 }
                 return new Response(await res.text(), { status: res.status });
@@ -517,8 +517,7 @@ class GDrive {
 
                 const res = await uploadPromise;
                 if (res.ok) {
-                    await this.cache.invalidateFileAndParent(fpath);
-                    await this.cache.delete(parentMetadata.id, 'objects');
+                    await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
                     return new Response(null, { status: 201 });
                 }
                 return new Response(await res.text(), { status: res.status });
@@ -601,8 +600,7 @@ class GDrive {
                 offset += currentChunkSize;
             }
 
-            await this.cache.invalidateFileAndParent(fpath);
-            if (!existingFileId) await this.cache.delete(parentMetadata.id, 'objects');
+            await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
             return new Response(null, { status: finalStatus <= 201 ? 201 : 204 });
 
         } catch (err: any) {
@@ -646,10 +644,10 @@ class GDrive {
 
         const result: any = await response.json();
         if (result.id) {
-            await this.cache.invalidateFileAndParent(fpath);
-            await this.cache.delete(dest_parent, 'meta');
-
-            if (originalParentId) await this.cache.delete(originalParentId, 'objects');
+            // The destination path now resolves to a different file, and both
+            // the old and the new parent lost a child.
+            await this.cache.invalidateFileAndParent(fpath, originalParentId);
+            await this.cache.delete(dest_fpath, 'meta');
             if (destParentId && destParentId !== originalParentId) await this.cache.delete(destParentId, 'objects');
 
             return new Response(null, { status: 201, headers: { 'Location': destination } });
@@ -685,7 +683,7 @@ class GDrive {
             body: JSON.stringify({ name: dest_name, parents: parents })
         });
 
-        await this.cache.delete(dest_parent, 'meta');
+        await this.cache.delete(dest_fpath, 'meta');
         if (destParentId) await this.cache.delete(destParentId, 'objects');
 
         return new Response(null, { status: 201 });
@@ -698,10 +696,7 @@ class GDrive {
         if (metadata) {
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
 
-            await this.cache.invalidateFileAndParent(fpath);
-            if (metadata.parents && metadata.parents.length > 0) {
-                await this.cache.delete(metadata.parents[0], 'objects');
-            }
+            await this.cache.invalidateFileAndParent(fpath, metadata.parents && metadata.parents[0]);
             return new Response(null, { status: response.status });
         }
         return new Response(null, { status: 404 });
