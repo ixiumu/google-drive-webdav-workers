@@ -56,8 +56,18 @@ const splitPath = (path: string): { name: string; parent: string } => {
 // the value has to be escaped with a backslash.
 const escapeQuery = (value: string): string => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
+// Decode a raw pathname a single time. Refusing to decode malformed input
+// (e.g. a literal "%zz") keeps a client from coercing the worker into a 500.
+const decodePath = (url: string): string => {
+    try {
+        return decodeURIComponent(new URL(url, 'http://localhost').pathname);
+    } catch {
+        throw new StatusError('Invalid path encoding', 400);
+    }
+};
+
 const getUrl = (url: string): { rpath: string; fpath: string } => {
-    const rpath = decodeURIComponent(new URL(url, 'http://localhost').pathname);
+    const rpath = decodePath(url);
     let fpath_relative = rpath;
     const basePath = config.path.endsWith('/') ? config.path : config.path + '/';
     if (basePath !== '/' && fpath_relative.startsWith(basePath)) {
@@ -98,8 +108,14 @@ function basicAuthentication(request: Request): { user: string; pass: string } |
     if (!Authorization) return null;
     const [scheme, encoded] = Authorization.split(' ');
     if (!encoded || scheme !== 'Basic') return null;
-    const buffer = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
-    const decoded = new TextDecoder().decode(buffer).normalize();
+    let decoded: string;
+    try {
+        const buffer = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+        decoded = new TextDecoder().decode(buffer).normalize();
+    } catch {
+        // Malformed base64 should not collapse into a 500.
+        return null;
+    }
     const index = decoded.indexOf(':');
     if (index === -1 || /[\0-\x1F\x7F]/.test(decoded)) return null;
     return { user: decoded.substring(0, index), pass: decoded.substring(index + 1) };
@@ -194,8 +210,10 @@ class GDrive {
     }
 
     async OPTIONS(request: Request): Promise<Response> {
+        // Class 3 (locking) is deliberately not advertised: LOCK/UNLOCK are
+        // no-ops here, so claiming "3" would overstate what the server offers.
         let allowed_methods = ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PROPFIND', 'MKCOL', 'DELETE', 'MOVE', 'COPY'].join(',');
-        return new Response(null, { status: 200, headers: { 'Allow': allowed_methods, 'DAV': '1, 2, 3', 'MS-Author-Via': 'DAV', 'Accept-Ranges': 'bytes' } });
+        return new Response(null, { status: 200, headers: { 'Allow': allowed_methods, 'DAV': '1, 2', 'MS-Author-Via': 'DAV', 'Accept-Ranges': 'bytes' } });
     }
 
     async PROPFIND(request: Request): Promise<Response> {
@@ -557,7 +575,6 @@ class GDrive {
         const CHUNK_SIZE = 10 * 1024 * 1024;
         let offset = 0;
         let residualBuffer: Uint8Array | null = null;
-        let finalStatus = 200;
 
         try {
             while (offset < contentLength) {
@@ -604,7 +621,7 @@ class GDrive {
 
                 if (chunkRes.status === 308) {
                 } else if (chunkRes.status === 200 || chunkRes.status === 201) {
-                    finalStatus = chunkRes.status;
+                    // completed; offset advances and loop exits
                 } else {
                     throw new StatusError(`Google Drive chunk failed: ${await chunkRes.text()}`, chunkRes.status);
                 }
@@ -612,7 +629,7 @@ class GDrive {
             }
 
             await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
-            return new Response(null, { status: finalStatus <= 201 ? 201 : 204 });
+            return new Response(null, { status: existingFileId ? 204 : 201 });
 
         } catch (err: any) {
             console.error('Upload Failed:', err);
@@ -630,8 +647,20 @@ class GDrive {
         if (!destination) return new Response(null, { status: 403 });
         const { fpath: dest_fpath } = getUrl(destination);
         if (dest_fpath === '/') return new Response(null, { status: 403 });
+        // A MOVE onto itself is a no-op that must not delete the source.
+        if (dest_fpath === fpath) return new Response(null, { status: 204 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
+
+        // RFC 4918: Overwrite defaults to "T"; "F" must 412 when the target
+        // already exists. Drive never dedupes by name, so emulate overwrite by
+        // replacing the destination first.
+        const overwrite = (request.headers.get('Overwrite') || 'T').toUpperCase() !== 'F';
+        const destExists = !!(await this.getMetadata(dest_fpath));
+        if (destExists) {
+            if (!overwrite) return new Response(null, { status: 412 });
+            await this.removeIfExists(dest_fpath);
+        }
 
         const { name, parent } = splitPath(fpath);
         const { name: dest_name, parent: dest_parent } = splitPath(dest_fpath);
@@ -666,7 +695,9 @@ class GDrive {
         await this.cache.delete(dest_fpath, 'meta');
         if (destParentId && destParentId !== originalParentId) await this.cache.delete(destParentId, 'objects');
 
-        return new Response(null, { status: 201, headers: { 'Location': destination } });
+        return destExists
+            ? new Response(null, { status: 204 })
+            : new Response(null, { status: 201, headers: { 'Location': destination } });
     }
 
     async COPY(request: Request): Promise<Response> {
@@ -676,8 +707,18 @@ class GDrive {
         if (!destination) return new Response(null, { status: 403 });
         const { fpath: dest_fpath } = getUrl(destination);
         if (dest_fpath === '/') return new Response(null, { status: 403 });
+        // Copying a resource onto itself is an error, not a no-op.
+        if (dest_fpath === fpath) return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
+
+        const overwrite = (request.headers.get('Overwrite') || 'T').toUpperCase() !== 'F';
+        const destExists = !!(await this.getMetadata(dest_fpath));
+        if (destExists) {
+            if (!overwrite) return new Response(null, { status: 412 });
+            await this.removeIfExists(dest_fpath);
+        }
+
         const { name, parent } = splitPath(fpath);
         const { name: dest_name, parent: dest_parent } = splitPath(dest_fpath);
 
@@ -702,7 +743,19 @@ class GDrive {
         await this.cache.delete(dest_fpath, 'meta');
         if (destParentId) await this.cache.delete(destParentId, 'objects');
 
-        return new Response(null, { status: 201 });
+        return new Response(null, { status: destExists ? 204 : 201 });
+    }
+
+    // Remove the resource at `fpath` if it exists. Used to emulate WebDAV
+    // overwrite semantics (RFC 4918 "Overwrite") for MOVE/COPY targets, since
+    // Google Drive allows duplicate names within a folder and never replaces
+    // an existing file in place.
+    async removeIfExists(fpath: string): Promise<boolean> {
+        const metadata = await this.getMetadata(fpath);
+        if (!metadata) return false;
+        const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
+        await this.cache.invalidateFileAndParent(fpath, metadata.parents && metadata.parents[0]);
+        return response.ok;
     }
 
     async DELETE(request: Request): Promise<Response> {
@@ -776,7 +829,19 @@ class GDrive {
 
     async LOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
     async UNLOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
-    async PROPPATCH(): Promise<Response> { return new Response(null, { status: 200 }); }
+    // Property updates are not persisted. Reply with a well-formed multistatus
+    // (207) echoing success instead of a bare 200, which is what DAV clients
+    // expect for PROPPATCH regardless of the DAV class advertised.
+    async PROPPATCH(request: Request): Promise<Response> {
+        let { rpath } = getUrl(request.url);
+        return new Response(
+            `<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:">` +
+            `<D:response><D:href>${escapeXml(encodePath(rpath))}</D:href>` +
+            `<D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat>` +
+            `</D:response></D:multistatus>`,
+            { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } }
+        );
+    }
 
     // Create any missing folder along the way to `path`, so a client can PUT
     // `/a/b/c.txt` without having to MKCOL `/a` and `/a/b` first.
@@ -884,7 +949,11 @@ class GDrive {
 
         if (result.error) {
             const errMsg = result.error.message || '';
-            if ((errMsg.includes('Rate Limit') || errMsg.includes('Quota exceeded') || response.status === 403 || response.status === 429) && retryCount < 3) {
+            const retriable = response.status === 429
+                || (typeof response.status === 'number' && response.status >= 500)
+                || errMsg.includes('Rate Limit')
+                || errMsg.includes('Quota exceeded');
+            if (retriable && retryCount < 3) {
                 await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
                 return this.queryDrive(params, retryCount + 1);
             }
@@ -1042,20 +1111,23 @@ export default {
 
             // Env
             if (env && !config.env) {
-                if (env.USERS) {
-                    if (typeof env.USERS === 'string') {
-                        try {
-                            const users = JSON.parse(env.USERS);
-                            // Silently keeping the placeholder credentials below
-                            // would leave the server reachable as user/password.
-                            config.users = users && typeof users === 'object' ? users : {};
-                        } catch (error) {
-                            console.error('USERS is not valid JSON');
-                            config.users = {};
-                        }
-                    } else if (typeof env.USERS === 'object') {
-                        config.users = env.USERS as Record<string, string>;
+                if (typeof env.USERS === 'string' && env.USERS.length > 0) {
+                    try {
+                        const users = JSON.parse(env.USERS);
+                        // Silently keeping the placeholder credentials below
+                        // would leave the server reachable as user/password.
+                        config.users = users && typeof users === 'object' ? users : {};
+                    } catch (error) {
+                        console.error('USERS is not valid JSON');
+                        config.users = {};
                     }
+                } else if (typeof env.USERS === 'object' && env.USERS) {
+                    config.users = env.USERS as Record<string, string>;
+                } else {
+                    // Fail closed: when running from bindings, a missing USERS
+                    // variable must never fall back to the static placeholder
+                    // credentials shipped in the default config.
+                    config.users = {};
                 }
                 if (env.CLIENT_ID) config.client_id = env.CLIENT_ID;
                 if (env.CLIENT_SECRET) config.client_secret = env.CLIENT_SECRET;
