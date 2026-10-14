@@ -35,8 +35,39 @@ const formatSize = (n: number | string): string => {
     return parseFloat((num / 1024 / 1024).toFixed(1)) + 'M';
 };
 
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+const escapeXml = (value: unknown): string =>
+    String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// Percent-encode each path segment individually so hrefs stay valid for names
+// containing spaces, "&", "#" or non-ASCII characters.
+const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
+
+// Collections are addressed with a trailing slash. Strip it so the final
+// segment is the resource name and not an empty string.
+const splitPath = (path: string): { name: string; parent: string } => {
+    const parts = (path.endsWith('/') ? path.slice(0, -1) : path).split('/');
+    const name = parts.pop()!;
+    return { name, parent: parts.join('/') };
+};
+
+// Drive query values are single-quoted; a literal backslash or quote inside
+// the value has to be escaped with a backslash.
+const escapeQuery = (value: string): string => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+// Decode a raw pathname a single time. Refusing to decode malformed input
+// (e.g. a literal "%zz") keeps a client from coercing the worker into a 500.
+const decodePath = (url: string): string => {
+    try {
+        return decodeURIComponent(new URL(url, 'http://localhost').pathname);
+    } catch {
+        throw new StatusError('Invalid path encoding', 400);
+    }
+};
+
 const getUrl = (url: string): { rpath: string; fpath: string } => {
-    const rpath = decodeURIComponent(new URL(url, 'http://localhost').pathname);
+    const rpath = decodePath(url);
     let fpath_relative = rpath;
     const basePath = config.path.endsWith('/') ? config.path : config.path + '/';
     if (basePath !== '/' && fpath_relative.startsWith(basePath)) {
@@ -48,13 +79,43 @@ const getUrl = (url: string): { rpath: string; fpath: string } => {
     };
 };
 
+// Constant-time string comparison. `crypto.subtle.timingSafeEqual` throws when
+// the buffers differ in length, and returning early would leak the length of
+// the stored secret through timing, so compare a value against itself instead.
+function timingSafeEqual(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const left = encoder.encode(a);
+    const right = encoder.encode(b);
+    return left.byteLength === right.byteLength
+        ? crypto.subtle.timingSafeEqual(left, right)
+        : !crypto.subtle.timingSafeEqual(left, left);
+}
+
+// Carry an upstream failure's HTTP status through to the client instead of
+// collapsing every error into a 500.
+function errorStatus(e: unknown): number {
+    const status = (e as any)?.status;
+    return typeof status === 'number' && status >= 400 && status <= 599 ? status : 500;
+}
+
+function isValidUser(users: Record<string, string>, creds: { user: string; pass: string }): boolean {
+    if (!Object.prototype.hasOwnProperty.call(users, creds.user)) return false;
+    return timingSafeEqual(String(users[creds.user]), creds.pass);
+}
+
 function basicAuthentication(request: Request): { user: string; pass: string } | null {
     const Authorization = request.headers.get('Authorization');
     if (!Authorization) return null;
     const [scheme, encoded] = Authorization.split(' ');
     if (!encoded || scheme !== 'Basic') return null;
-    const buffer = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
-    const decoded = new TextDecoder().decode(buffer).normalize();
+    let decoded: string;
+    try {
+        const buffer = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+        decoded = new TextDecoder().decode(buffer).normalize();
+    } catch {
+        // Malformed base64 should not collapse into a 500.
+        return null;
+    }
     const index = decoded.indexOf(':');
     if (index === -1 || /[\0-\x1F\x7F]/.test(decoded)) return null;
     return { user: decoded.substring(0, index), pass: decoded.substring(index + 1) };
@@ -114,12 +175,15 @@ class KVCache {
         }
     }
 
-    async invalidateFileAndParent(fpath: string): Promise<void> {
+    // Drops the path -> id mapping for the written entry, the parent's own
+    // mapping, and the parent's child listing. The last one is what PROPFIND
+    // and GET read, so skipping it on an overwrite left stale entries in the
+    // directory listing for up to five minutes.
+    async invalidateFileAndParent(fpath: string, parentId?: string | null): Promise<void> {
+        const { parent } = splitPath(fpath);
         await this.delete(fpath, 'meta');
-        const tok = fpath.split('/');
-        tok.pop();
-        const parent = tok.join('/');
-        await this.delete(parent, 'meta');
+        if (parent !== fpath) await this.delete(parent, 'meta');
+        if (parentId) await this.delete(parentId, 'objects');
     }
 }
 
@@ -133,6 +197,10 @@ class StatusError extends Error {
     }
 }
 
+// The OAuth access token is deliberately kept out of `config.cache`, which is
+// persisted to KV: a bearer token does not belong on durable shared storage.
+let tokenCache: { access_token: string; expires: number } | null = null;
+
 class GDrive {
     cache: KVCache;
     static fetchingTokenPromise: Promise<string> | null = null;
@@ -142,8 +210,10 @@ class GDrive {
     }
 
     async OPTIONS(request: Request): Promise<Response> {
+        // Class 3 (locking) is deliberately not advertised: LOCK/UNLOCK are
+        // no-ops here, so claiming "3" would overstate what the server offers.
         let allowed_methods = ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PROPFIND', 'MKCOL', 'DELETE', 'MOVE', 'COPY'].join(',');
-        return new Response(null, { status: 200, headers: { 'Allow': allowed_methods, 'DAV': '1, 2, 3', 'MS-Author-Via': 'DAV', 'Accept-Ranges': 'bytes' } });
+        return new Response(null, { status: 200, headers: { 'Allow': allowed_methods, 'DAV': '1, 2', 'MS-Author-Via': 'DAV', 'Accept-Ranges': 'bytes' } });
     }
 
     async PROPFIND(request: Request): Promise<Response> {
@@ -151,49 +221,59 @@ class GDrive {
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
-        let content: string;
-        if (metadata.mimeType === 'application/vnd.google-apps.folder') {
-            const depth = request.headers.get('Depth');
-            if (depth && depth === '1') {
-                const objects = await this.getObjects(metadata.id);
-                let files: Partial<DriveFile>[] = [];
-                for (let i = 0; i < objects.length; i++) {
-                    let object = objects[i];
-                    files.push({ name: object.name, dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toUTCString(), size: object.size ? object.size : 0 });
-                }
-                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: null, size: 0 }, ...(files || [])], '');
-            } else {
-                content = arrayToXml(rpath, [{ name: '', dir: true, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size, quota: fpath === '/' ? await this.getQuota() : null }]);
-            }
-        } else {
-            content = arrayToXml(rpath, [{ name: '', dir: false, lastmodified: new Date(metadata.modifiedTime).toUTCString(), size: metadata.size }]);
+        // A missing Depth header means "infinity" (RFC 4918). Serving the
+        // immediate children instead keeps a single request useful for clients
+        // that never send the header.
+        const depth = request.headers.get('Depth');
+        const isFolder = metadata.mimeType === FOLDER_MIME;
+
+        const self: Partial<DriveFile> = {
+            name: '',
+            dir: isFolder,
+            lastmodified: metadata.modifiedTime ? new Date(metadata.modifiedTime).toUTCString() : new Date().toUTCString(),
+            size: metadata.size,
+            type: metadata.mimeType,
+            etag: (metadata.id || 'root') + '-' + (metadata.modifiedTime || ''),
+            quota: isFolder && depth === '0' && fpath === '/' ? await this.getQuota() : null
+        };
+
+        let entries: Partial<DriveFile>[] = [self];
+        if (isFolder && depth !== '0') {
+            const objects = await this.getObjects(metadata.id);
+            entries = entries.concat(objects.map(object => ({
+                name: object.name,
+                dir: object.mimeType === FOLDER_MIME,
+                lastmodified: new Date(object.modifiedTime).toUTCString(),
+                size: object.size ? object.size : 0,
+                type: object.mimeType,
+                etag: object.id + '-' + (object.modifiedTime || '')
+            })));
         }
-        return new Response(content, { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
+
+        return new Response(arrayToXml(rpath, entries), { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
     }
 
     async MKCOL(request: Request): Promise<Response> {
         let { rpath, fpath } = getUrl(request.url);
-        if (fpath.slice(-1) === '/') fpath = fpath.slice(0, -1);
 
         let metadata = await this.getMetadata(fpath);
-        if (metadata) return new Response('<d:error xmlns:d="DAV:" xmlns:td="https://www.contoso.com/schema/"><td:exception>MethodNotAllowed</td:exception><td:message>The resource you tried to create already exists</td:message></d:error>', { status: 405 });
+        if (metadata) return new Response('<D:error xmlns:D="DAV:"><D:exception>MethodNotAllowed</D:exception><D:message>The resource you tried to create already exists</D:message></D:error>', { status: 405 });
 
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-        let parentMetadata = await this.getMetadata(parent);
+        const { name, parent } = splitPath(fpath);
+        const parentMetadata = await this.ensureDir(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
 
         let response = await fetch(new Request('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
-            body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parentMetadata.id] }),
+            body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentMetadata.id] }),
             method: 'POST',
             headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) }
         }));
 
         if (response.ok) {
-            await this.cache.invalidateFileAndParent(fpath);
-            await this.cache.delete(parentMetadata.id, 'objects');
+            await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
             return new Response(null, { status: 201 });
         }
-        return new Response(null, { status: 422 });
+        return new Response(await response.text(), { status: response.status });
     }
 
     async GET(request: Request): Promise<Response> {
@@ -203,32 +283,47 @@ class GDrive {
         const metadata = await this.getMetadata(fpath);
         if (metadata) {
             try {
-                if (metadata.mimeType === 'application/vnd.google-apps.folder') {
+                if (metadata.mimeType === FOLDER_MIME) {
+                    // The listing below is built from relative links, so a
+                    // collection URL without a trailing slash would resolve every
+                    // child link against the wrong parent directory.
+                    if (!url.pathname.endsWith('/')) {
+                        const redirectUrl = new URL(request.url);
+                        redirectUrl.pathname += '/';
+                        return Response.redirect(redirectUrl.toString(), 301);
+                    }
                     const objects = await this.getObjects(metadata.id);
                     let files: Partial<DriveFile>[] = [];
                     for (let i = 0; i < objects.length; i++) {
                         let object = objects[i];
-                        files.push({ name: trimString(object.name, '/'), dir: object.mimeType === 'application/vnd.google-apps.folder', lastmodified: new Date(object.modifiedTime).toISOString().split('T')[0], size: object.size ? object.size : 0, iconLink: object.iconLink });
+                        files.push({ name: trimString(object.name, '/'), dir: object.mimeType === FOLDER_MIME, lastmodified: new Date(object.modifiedTime).toISOString().split('T')[0], size: object.size ? object.size : 0, iconLink: object.iconLink });
                     }
                     return new Response(arrayToHtml(rpath, files), { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
                 }
-                if (metadata.mimeType.startsWith('image/')) {
+                if (metadata.mimeType.startsWith('image/') && metadata.thumbnailLink) {
                     const tempLink = metadata.thumbnailLink.replace(/=s\d+$/, '');
                     const rawParam = url.searchParams.get('param');
-                    const paramSuffix = rawParam ? `=${rawParam}` : '=s0';
-                    return await fetch(new Request(tempLink + paramSuffix, request));
+                    // Plain fetch: the client's Authorization header must never be
+                    // forwarded to Google's CDN. If the short-lived link has
+                    // expired, fall through to the download endpoint below.
+                    const thumb = await fetch(tempLink + (rawParam ? `=${rawParam}` : '=s0'));
+                    if (thumb.ok) return thumb;
                 }
                 const abuse = url.searchParams.get('abuse') === 'true';
                 const range = request.headers.get('Range');
                 response = await this.getRawContent(metadata.id, range, abuse);
                 if (response.status >= 400) {
-                    const result: any = await response.json();
-                    if (!abuse && response.status === 403 && result.error.errors[0].reason === 'cannotDownloadAbusiveFile') {
+                    // The body is not always JSON, and `errors` is not always
+                    // populated; either would otherwise turn into a 500 that
+                    // hides Drive's real status.
+                    const result: any = await response.json().catch(() => ({}));
+                    const reason = result?.error?.errors?.[0]?.reason;
+                    if (!abuse && response.status === 403 && reason === 'cannotDownloadAbusiveFile') {
                         return Response.redirect(url.origin + url.pathname + '?abuse=true', 302);
                     }
-                    throw new StatusError(result.error.message, response.status);
+                    throw new StatusError(result?.error?.message || response.statusText || 'Drive error', response.status);
                 }
-            } catch (e: any) { return new Response(e.message, { status: 500 }); }
+            } catch (e: any) { return new Response(e.message, { status: errorStatus(e) }); }
         } else { response = new Response(null, { status: 404 }); }
         return response;
     }
@@ -253,8 +348,8 @@ class GDrive {
                 }
             }
 
-            const tok = targetPath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-            let parentMetadata = await this.getMetadata(parent);
+            const { name, parent } = splitPath(targetPath);
+            const parentMetadata = await this.ensureDir(parent);
             if (!parentMetadata) return new Response('Parent folder not found', { status: 404 });
 
             const metadata = await this.getMetadata(targetPath);
@@ -277,7 +372,7 @@ class GDrive {
             if (!uploadUrl) {
                 const errText = await response.text();
                 console.error('GDrive TUS init failed. Status:', response.status, 'Response:', errText);
-                return new Response(`Failed to get GDrive resumable URL`, { status: 500 });
+                return new Response(`Failed to get GDrive resumable URL`, { status: response.status });
             }
 
             const sessionId = crypto.randomUUID();
@@ -333,8 +428,7 @@ class GDrive {
                 });
             } else if (res.status === 200 || res.status === 201) {
                 await this.cache.delete(sessionId, 'tus_session');
-                await this.cache.invalidateFileAndParent(session.targetPath);
-                if (!session.existingFileId) await this.cache.delete(session.parentId, 'objects');
+                await this.cache.invalidateFileAndParent(session.targetPath, session.parentId);
 
                 return new Response(null, {
                     status: 204,
@@ -349,33 +443,54 @@ class GDrive {
     async PUT(request: Request): Promise<Response> {
         let { fpath } = getUrl(request.url);
         if (fpath.slice(-1) === '/') return new Response(null, { status: 405 });
-        const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
         const mimeType = request.headers.get('Content-Type') || 'application/octet-stream';
 
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-        let parentMetadata = await this.getMetadata(parent);
+        let contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
+        let body: ReadableStream<Uint8Array> | null = request.body;
+
+        // A chunked upload carries no Content-Length header, so the size is
+        // unknown and the request would otherwise be treated as a zero byte
+        // write. Buffer the body to recover the length.
+        if (body && !request.headers.has('Content-Length')) {
+            const buffered = await request.arrayBuffer();
+            contentLength = buffered.byteLength;
+            body = contentLength > 0 ? new Response(buffered).body : null;
+        }
+
+        const { name, parent } = splitPath(fpath);
+        const parentMetadata = await this.ensureDir(parent);
         if (!parentMetadata) return new Response(null, { status: 404 });
         const metadata = await this.getMetadata(fpath);
         const existingFileId = metadata?.id || null;
         const api = 'https://www.googleapis.com/upload/drive/v3/files';
-        if (contentLength === 0 || !request.body) {
-            const initUrl = existingFileId ? `https://www.googleapis.com/drive/v3/files/${existingFileId}` : `https://www.googleapis.com/drive/v3/files`;
-            const initMethod = existingFileId ? 'PATCH' : 'POST';
-            const body = existingFileId ? '{}' : JSON.stringify({ name, parents: [parentMetadata.id], mimeType });
-            const response = await fetch(initUrl, {
-                method: initMethod,
+        if (contentLength === 0 || !body) {
+            if (existingFileId) {
+                // A JSON PATCH with "{}" only touches metadata and would leave the
+                // previous bytes behind, so truncate through the media endpoint.
+                const response = await fetch(`${api}/${existingFileId}?uploadType=media`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': mimeType, Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                    body: new Uint8Array(0)
+                });
+                if (response.ok) {
+                    await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
+                    return new Response(null, { status: 204 });
+                }
+                return new Response(null, { status: response.status });
+            }
+            const response = await fetch('https://www.googleapis.com/drive/v3/files', {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
-                body
+                body: JSON.stringify({ name, parents: [parentMetadata.id], mimeType })
             });
             if (response.ok) {
-                await this.cache.invalidateFileAndParent(fpath);
-                if (!existingFileId) await this.cache.delete(parentMetadata.id, 'objects');
-                return new Response(null, { status: existingFileId ? 204 : 201 });
+                await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
+                return new Response(null, { status: 201 });
             }
             return new Response(null, { status: response.status });
         }
         if (contentLength <= 5 * 1024 * 1024) {
-            const reader = request.body.getReader();
+            const reader = body.getReader();
             if (existingFileId) {
                 // @ts-ignore
                 const { readable, writable } = new FixedLengthStream(contentLength);
@@ -397,7 +512,7 @@ class GDrive {
                 } catch (err) { try { await reader.cancel(); } catch (e) { } await writer.abort(err); } finally { reader.releaseLock(); }
                 const res = await uploadPromise;
                 if (res.ok) {
-                    await this.cache.invalidateFileAndParent(fpath);
+                    await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
                     return new Response(null, { status: 204 });
                 }
                 return new Response(await res.text(), { status: res.status });
@@ -431,8 +546,7 @@ class GDrive {
 
                 const res = await uploadPromise;
                 if (res.ok) {
-                    await this.cache.invalidateFileAndParent(fpath);
-                    await this.cache.delete(parentMetadata.id, 'objects');
+                    await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
                     return new Response(null, { status: 201 });
                 }
                 return new Response(await res.text(), { status: res.status });
@@ -457,11 +571,10 @@ class GDrive {
         const uploadUrl = initRes.headers.get('Location');
         if (!uploadUrl) return new Response('Failed to get Resumable Upload URL', { status: 500 });
 
-        const reader = request.body.getReader();
+        const reader = body.getReader();
         const CHUNK_SIZE = 10 * 1024 * 1024;
         let offset = 0;
         let residualBuffer: Uint8Array | null = null;
-        let finalStatus = 200;
 
         try {
             while (offset < contentLength) {
@@ -508,21 +621,20 @@ class GDrive {
 
                 if (chunkRes.status === 308) {
                 } else if (chunkRes.status === 200 || chunkRes.status === 201) {
-                    finalStatus = chunkRes.status;
+                    // completed; offset advances and loop exits
                 } else {
-                    throw new Error(`Google Drive chunk failed: ${await chunkRes.text()}`);
+                    throw new StatusError(`Google Drive chunk failed: ${await chunkRes.text()}`, chunkRes.status);
                 }
                 offset += currentChunkSize;
             }
 
-            await this.cache.invalidateFileAndParent(fpath);
-            if (!existingFileId) await this.cache.delete(parentMetadata.id, 'objects');
-            return new Response(null, { status: finalStatus <= 201 ? 201 : 204 });
+            await this.cache.invalidateFileAndParent(fpath, parentMetadata.id);
+            return new Response(null, { status: existingFileId ? 204 : 201 });
 
         } catch (err: any) {
             console.error('Upload Failed:', err);
             try { await reader.cancel(); } catch (e) { }
-            return new Response('Upload Failed', { status: 500 });
+            return new Response(err?.message || 'Upload Failed', { status: errorStatus(err) });
         } finally {
             if (reader) reader.releaseLock();
         }
@@ -534,11 +646,24 @@ class GDrive {
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
         const { fpath: dest_fpath } = getUrl(destination);
+        if (dest_fpath === '/') return new Response(null, { status: 403 });
+        // A MOVE onto itself is a no-op that must not delete the source.
+        if (dest_fpath === fpath) return new Response(null, { status: 204 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
 
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop()!; const dest_parent = dest_tok.join('/');
+        // RFC 4918: Overwrite defaults to "T"; "F" must 412 when the target
+        // already exists. Drive never dedupes by name, so emulate overwrite by
+        // replacing the destination first.
+        const overwrite = (request.headers.get('Overwrite') || 'T').toUpperCase() !== 'F';
+        const destExists = !!(await this.getMetadata(dest_fpath));
+        if (destExists) {
+            if (!overwrite) return new Response(null, { status: 412 });
+            await this.removeIfExists(dest_fpath);
+        }
+
+        const { name, parent } = splitPath(fpath);
+        const { name: dest_name, parent: dest_parent } = splitPath(dest_fpath);
 
         let patchUrl: string | undefined;
         let originalParentId = metadata.parents && metadata.parents.length > 0 ? metadata.parents[0] : null;
@@ -557,28 +682,45 @@ class GDrive {
             body: name !== dest_name ? JSON.stringify({ name: dest_name }) : null
         });
 
-        const result: any = await response.json();
-        if (result.id) {
-            await this.cache.invalidateFileAndParent(fpath);
-            await this.cache.delete(dest_parent, 'meta');
+        const bodyText = await response.text();
+        if (!response.ok) return new Response(bodyText, { status: response.status });
 
-            if (originalParentId) await this.cache.delete(originalParentId, 'objects');
-            if (destParentId && destParentId !== originalParentId) await this.cache.delete(destParentId, 'objects');
+        let result: any = {};
+        try { result = JSON.parse(bodyText); } catch { /* not JSON */ }
+        if (!result.id) return new Response(bodyText, { status: 500 });
 
-            return new Response(null, { status: 201, headers: { 'Location': destination } });
-        }
+        // The destination path now resolves to a different file, and both
+        // the old and the new parent lost a child.
+        await this.cache.invalidateFileAndParent(fpath, originalParentId);
+        await this.cache.delete(dest_fpath, 'meta');
+        if (destParentId && destParentId !== originalParentId) await this.cache.delete(destParentId, 'objects');
+
+        return destExists
+            ? new Response(null, { status: 204 })
+            : new Response(null, { status: 201, headers: { 'Location': destination } });
     }
 
     async COPY(request: Request): Promise<Response> {
         let { fpath } = getUrl(request.url);
+        if (fpath === '/') return new Response(null, { status: 403 });
         let destination = request.headers.get('Destination');
         if (!destination) return new Response(null, { status: 403 });
         const { fpath: dest_fpath } = getUrl(destination);
         if (dest_fpath === '/') return new Response(null, { status: 403 });
+        // Copying a resource onto itself is an error, not a no-op.
+        if (dest_fpath === fpath) return new Response(null, { status: 403 });
         const metadata = await this.getMetadata(fpath);
         if (!metadata) return new Response(null, { status: 404 });
-        const tok = fpath.split('/'); const name = tok.pop()!; const parent = tok.join('/');
-        const dest_tok = dest_fpath.split('/'); const dest_name = dest_tok.pop()!; const dest_parent = dest_tok.join('/');
+
+        const overwrite = (request.headers.get('Overwrite') || 'T').toUpperCase() !== 'F';
+        const destExists = !!(await this.getMetadata(dest_fpath));
+        if (destExists) {
+            if (!overwrite) return new Response(null, { status: 412 });
+            await this.removeIfExists(dest_fpath);
+        }
+
+        const { name, parent } = splitPath(fpath);
+        const { name: dest_name, parent: dest_parent } = splitPath(dest_fpath);
 
         let parents = metadata.parents;
         let destParentId = null;
@@ -592,15 +734,28 @@ class GDrive {
             destParentId = metadata.parents && metadata.parents.length > 0 ? metadata.parents[0] : null;
         }
 
-        await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '/copy?supportsAllDrives=true', {
+        const copyResponse = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '/copy?supportsAllDrives=true', {
             method: 'POST', headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
             body: JSON.stringify({ name: dest_name, parents: parents })
         });
+        if (!copyResponse.ok) return new Response(await copyResponse.text(), { status: copyResponse.status });
 
-        await this.cache.delete(dest_parent, 'meta');
+        await this.cache.delete(dest_fpath, 'meta');
         if (destParentId) await this.cache.delete(destParentId, 'objects');
 
-        return new Response(null, { status: 201 });
+        return new Response(null, { status: destExists ? 204 : 201 });
+    }
+
+    // Remove the resource at `fpath` if it exists. Used to emulate WebDAV
+    // overwrite semantics (RFC 4918 "Overwrite") for MOVE/COPY targets, since
+    // Google Drive allows duplicate names within a folder and never replaces
+    // an existing file in place.
+    async removeIfExists(fpath: string): Promise<boolean> {
+        const metadata = await this.getMetadata(fpath);
+        if (!metadata) return false;
+        const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
+        await this.cache.invalidateFileAndParent(fpath, metadata.parents && metadata.parents[0]);
+        return response.ok;
     }
 
     async DELETE(request: Request): Promise<Response> {
@@ -610,10 +765,7 @@ class GDrive {
         if (metadata) {
             const response = await fetch('https://www.googleapis.com/drive/v3/files/' + metadata.id + '?supportsAllDrives=true', { method: 'DELETE', headers: { Authorization: 'Bearer ' + (await this.getAccessToken()) } });
 
-            await this.cache.invalidateFileAndParent(fpath);
-            if (metadata.parents && metadata.parents.length > 0) {
-                await this.cache.delete(metadata.parents[0], 'objects');
-            }
+            await this.cache.invalidateFileAndParent(fpath, metadata.parents && metadata.parents[0]);
             return new Response(null, { status: response.status });
         }
         return new Response(null, { status: 404 });
@@ -677,7 +829,47 @@ class GDrive {
 
     async LOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
     async UNLOCK(): Promise<Response> { return new Response(null, { status: 200 }); }
-    async PROPPATCH(): Promise<Response> { return new Response(null, { status: 200 }); }
+    // Property updates are not persisted. Reply with a well-formed multistatus
+    // (207) echoing success instead of a bare 200, which is what DAV clients
+    // expect for PROPPATCH regardless of the DAV class advertised.
+    async PROPPATCH(request: Request): Promise<Response> {
+        let { rpath } = getUrl(request.url);
+        return new Response(
+            `<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:">` +
+            `<D:response><D:href>${escapeXml(encodePath(rpath))}</D:href>` +
+            `<D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat>` +
+            `</D:response></D:multistatus>`,
+            { status: 207, headers: { 'Content-Type': 'application/xml; charset=utf-8' } }
+        );
+    }
+
+    // Create any missing folder along the way to `path`, so a client can PUT
+    // `/a/b/c.txt` without having to MKCOL `/a` and `/a/b` first.
+    async ensureDir(path: string): Promise<any | null> {
+        let current = await this.getMetadata('/');
+        if (!current) return null;
+        const dir = path.endsWith('/') ? path : path + '/';
+        if (dir === '/') return current;
+
+        const names = dir.split('/').filter(Boolean);
+        for (let i = 0; i < names.length; i++) {
+            const sub = '/' + names.slice(0, i + 1).join('/') + '/';
+            let meta = await this.getMetadata(sub);
+            if (!meta) {
+                const created = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json; charset=UTF-8', Authorization: 'Bearer ' + (await this.getAccessToken()) },
+                    body: JSON.stringify({ name: names[i], mimeType: FOLDER_MIME, parents: [current.id] })
+                });
+                if (!created.ok) return null;
+                await this.cache.invalidateFileAndParent(sub, current.id);
+                meta = await this.getMetadata(sub);
+                if (!meta) return null;
+            }
+            current = meta;
+        }
+        return current;
+    }
 
     async getMetadata(path: string): Promise<any> {
         path = path.startsWith('/') ? path : '/' + path;
@@ -696,11 +888,12 @@ class GDrive {
             fullpath += name + '/';
             meta = await this.cache.get(fullpath, 'meta');
             if (!meta) {
-                name = decodeURIComponent(name).replace(/\'/g, "\\'");
+                // `getUrl` already decoded the path once; decoding again here
+                // threw a URIError for any name containing a literal "%".
                 const result = await this.queryDrive({
                     includeItemsFromAllDrives: true,
                     supportsAllDrives: true,
-                    q: `'${metadata.id}' in parents and name = '${name}' and trashed = false`,
+                    q: `'${metadata.id}' in parents and name = '${escapeQuery(name)}' and trashed = false`,
                     fields: `files(id, name, mimeType, size, modifiedTime, description, iconLink, thumbnailLink, imageMediaMetadata, parents)`,
                 });
                 if (result.files && result.files.length > 0) {
@@ -756,7 +949,11 @@ class GDrive {
 
         if (result.error) {
             const errMsg = result.error.message || '';
-            if ((errMsg.includes('Rate Limit') || errMsg.includes('Quota exceeded') || response.status === 403 || response.status === 429) && retryCount < 3) {
+            const retriable = response.status === 429
+                || (typeof response.status === 'number' && response.status >= 500)
+                || errMsg.includes('Rate Limit')
+                || errMsg.includes('Quota exceeded');
+            if (retriable && retryCount < 3) {
                 await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, retryCount)));
                 return this.queryDrive(params, retryCount + 1);
             }
@@ -772,8 +969,7 @@ class GDrive {
     }
 
     async getAccessToken(): Promise<string> {
-        let token = await this.cache.get('token', 'config');
-        if (token && token.expires && token.expires > Date.now()) return token.access_token;
+        if (tokenCache && tokenCache.expires > Date.now()) return tokenCache.access_token;
         if (GDrive.fetchingTokenPromise) {
             return await GDrive.fetchingTokenPromise;
         }
@@ -793,12 +989,7 @@ class GDrive {
                 if (result.error) {
                     throw new StatusError(result.error_description, response.status);
                 }
-                await this.cache.put(
-                    'token',
-                    { expires: Date.now() + 3500 * 1000, access_token: result.access_token },
-                    'config',
-                    3500 * 1000
-                );
+                tokenCache = { expires: Date.now() + 3500 * 1000, access_token: result.access_token };
                 return result.access_token;
             } finally {
                 GDrive.fetchingTokenPromise = null;
@@ -808,27 +999,48 @@ class GDrive {
     }
 }
 
-function arrayToXml(rpath: string, files: Partial<DriveFile>[], cursor?: string): string {
-    let entries: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-        let file = files[i];
-        if (!file.lastmodified) file.lastmodified = new Date().toUTCString();
-        let sizeTag = !file.dir ? `<d:getcontentlength>${file.size}</d:getcontentlength>` : '<d:getcontentlength />';
-        let quotaTag = file.quota ? `<d:quota-used-bytes>${file.quota.used}</d:quota-used-bytes><d:quota-available-bytes>${file.quota.available}</d:quota-available-bytes>` : '';
+function arrayToXml(rpath: string, files: Partial<DriveFile>[]): string {
+    const lock =
+        '<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope>' +
+        '<D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>';
 
+    const entries = files.map(file => {
+        // The self entry (no name) echoes the requested path.
         let href = file.name ? pathJoin(rpath, file.name) : rpath;
         if (file.dir && !href.endsWith('/')) href += '/';
+        const displayname = file.name || rpath.split('/').filter(Boolean).pop() || '';
+        const etag = String(file.etag || '0').replace(/[<>&"]/g, '');
+        // Numeric fields are serialised as numbers, never as whatever Drive
+        // happened to hand back; an unbounded quota is reported as NaN.
+        const size = Number(file.size) || 0;
+        const quota = file.quota
+            ? `<D:quota-used-bytes>${Number(file.quota.used) || 0}</D:quota-used-bytes>` +
+              `<D:quota-available-bytes>${Number(file.quota.available) || 0}</D:quota-available-bytes>`
+            : '';
 
-        entries.push(
-            '<d:response>', `<d:href>${encodeURI(href)}</d:href>`, '<d:propstat>', '<d:prop>',
-            `<d:getlastmodified>${file.lastmodified}</d:getlastmodified>`,
-            file.dir ? '<d:resourcetype><d:collection/></d:resourcetype>' : '<d:resourcetype />',
-            sizeTag, quotaTag,
-            '</d:prop>', '<d:status>HTTP/1.1 200 OK</d:status>', '</d:propstat>', '</d:response>'
+        return (
+            '<D:response>' +
+            `<D:href>${escapeXml(encodePath(href))}</D:href>` +
+            '<D:propstat><D:prop>' +
+            (file.dir
+                ? '<D:resourcetype><D:collection/></D:resourcetype>'
+                : '<D:resourcetype></D:resourcetype>') +
+            `<D:displayname>${escapeXml(displayname)}</D:displayname>` +
+            // Folders deliberately omit getcontentlength: an empty size on a
+            // collection upsets several clients.
+            (file.dir
+                ? ''
+                : `<D:getcontentlength>${size}</D:getcontentlength>` +
+                  `<D:getcontenttype>${escapeXml(file.type || 'application/octet-stream')}</D:getcontenttype>`) +
+            `<D:getetag>"${etag}"</D:getetag>` +
+            `<D:getlastmodified>${file.lastmodified || new Date().toUTCString()}</D:getlastmodified>` +
+            lock + quota +
+            '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>' +
+            '</D:response>'
         );
-    }
-    let new_cursor = cursor ? `<td:cursor>${cursor}</td:cursor>` : '';
-    return `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:" xmlns:R="https://www.contoso.com/schema/">${entries.join('\n')}${new_cursor}</d:multistatus>`;
+    });
+
+    return `<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:">${entries.join('')}</D:multistatus>`;
 }
 
 function arrayToHtml(rpath: string, files: Partial<DriveFile>[]): string {
@@ -840,17 +1052,25 @@ function arrayToHtml(rpath: string, files: Partial<DriveFile>[]): string {
     if (!isRoot) frag.push(`<a href="../"><div><img src="/_/16/type/application/vnd.google-apps.folder"><b>../</b></div></a>`);
     if (files) {
         for (let i = 0; i < files.length; i++) {
-            let entry = files[i];
-            let iconLink = entry.iconLink ? entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/') : '';
-            let modTime = entry.lastmodified ? `<div>${new Date(entry.lastmodified).toISOString().split('T')[0]}</div>` : '';
+            const entry = files[i];
+            const rawName = entry.name || '';
+            const iconLink = entry.iconLink ? entry.iconLink.replace('https://drive-thirdparty.googleusercontent.com/', '/_/') : '';
+            const modTime = entry.lastmodified ? `<div>${escapeXml(new Date(entry.lastmodified).toISOString().split('T')[0])}</div>` : '';
+            // Names come from Drive and are fully attacker controlled: escape them
+            // for HTML text and percent-encode them for the href.
+            const name = escapeXml(rawName);
+            const href = encodeURIComponent(rawName);
             if (entry.dir) {
-                frag.push(`<a href="${entry.name}/"><div><img src="${iconLink}"/><b>${entry.name}</b></div>${modTime}</a>`);
+                frag.push(`<a href="${href}/"><div><img src="${escapeXml(iconLink)}"/><b>${name}</b></div>${modTime}</a>`);
             } else {
-                frag.push(`<a href="${entry.name}" target="_blank"><div><img src="${iconLink}"/>${entry.name}</div><div>${formatSize(entry.size || 0)}</div>${modTime}</a>`);
+                frag.push(`<a href="${href}" target="_blank"><div><img src="${escapeXml(iconLink)}"/>${name}</div><div>${formatSize(entry.size || 0)}</div>${modTime}</a>`);
             }
         }
     }
-    return tpl.trim().replace(/{{content}}/, frag.join('')).replace(/{{title}}/, title);
+    const content = frag.join('');
+    // Replacer functions: substitution patterns such as `$&` in a file name
+    // would otherwise be expanded by `String.prototype.replace`.
+    return tpl.trim().replace(/{{content}}/, () => content).replace(/{{title}}/, () => escapeXml(title));
 }
 
 export default {
@@ -865,8 +1085,12 @@ export default {
         try {
             // Static
             if (pathname.startsWith('/_/')) {
-                let url = new URL(request.url); url.hostname = 'drive-thirdparty.googleusercontent.com'; url.pathname = url.pathname.slice(2);
-                let response = await fetch(new Request(url.toString(), request));
+                const url = new URL(request.url);
+                url.hostname = 'drive-thirdparty.googleusercontent.com';
+                url.pathname = url.pathname.slice(2);
+                // Plain fetch: do not forward the client's credentials to a
+                // third-party host.
+                let response = await fetch(url.toString());
                 response = new Response(response.body, response);
                 response.headers.set('Access-Control-Allow-Origin', '*');
                 response.headers.set('Cache-Control', 'public, max-age=16768000');
@@ -876,7 +1100,9 @@ export default {
             let basePath = config.path.endsWith('/') ? config.path : config.path + '/';
             if (basePath !== '/') {
                 if (pathname + '/' === basePath) {
-                    return Response.redirect(request.url + '/', 301);
+                    const u = new URL(request.url);
+                    u.pathname += '/';
+                    return Response.redirect(u.toString(), 301);
                 }
                 if (!pathname.startsWith(basePath)) {
                     return new Response('404 Not Found', { status: 404 });
@@ -885,17 +1111,23 @@ export default {
 
             // Env
             if (env && !config.env) {
-                if (env.USERS) {
-                    if (typeof env.USERS === 'string') {
-                        try {
-                            const users = JSON.parse(env.USERS);
-                            if (users) config.users = users;
-                        } catch (error) {
-                            console.log(error);
-                        }
-                    } else if (typeof env.USERS === 'object') {
-                        config.users = env.USERS as Record<string, string>;
+                if (typeof env.USERS === 'string' && env.USERS.length > 0) {
+                    try {
+                        const users = JSON.parse(env.USERS);
+                        // Silently keeping the placeholder credentials below
+                        // would leave the server reachable as user/password.
+                        config.users = users && typeof users === 'object' ? users : {};
+                    } catch (error) {
+                        console.error('USERS is not valid JSON');
+                        config.users = {};
                     }
+                } else if (typeof env.USERS === 'object' && env.USERS) {
+                    config.users = env.USERS as Record<string, string>;
+                } else {
+                    // Fail closed: when running from bindings, a missing USERS
+                    // variable must never fall back to the static placeholder
+                    // credentials shipped in the default config.
+                    config.users = {};
                 }
                 if (env.CLIENT_ID) config.client_id = env.CLIENT_ID;
                 if (env.CLIENT_SECRET) config.client_secret = env.CLIENT_SECRET;
@@ -909,6 +1141,9 @@ export default {
             }
 
             // Global Basic Authentication
+            if (Object.keys(config.users).length === 0) {
+                return new Response('Server not configured: set the USERS variable', { status: 500 });
+            }
             if (!request.headers.has('Authorization')) {
                 return new Response('Authentication Required.', {
                     status: 401,
@@ -917,8 +1152,19 @@ export default {
             }
 
             const auth = basicAuthentication(request);
-            if (!auth || !config.users[auth.user] || config.users[auth.user] !== auth.pass) {
+            if (!auth || !isValidUser(config.users, auth)) {
                 return new Response('Unauthorized', { status: 401 });
+            }
+
+            const missing = [
+                ['CLIENT_ID', config.client_id],
+                ['CLIENT_SECRET', config.client_secret],
+                ['REFRESH_TOKEN', config.refresh_token]
+            ]
+                .filter(([, value]) => !value)
+                .map(([key]) => key);
+            if (missing.length > 0) {
+                return new Response('Server not configured: missing ' + missing.join(', '), { status: 500 });
             }
 
             const drive = new GDrive(env, ctx);
